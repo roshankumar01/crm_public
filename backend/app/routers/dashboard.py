@@ -1,0 +1,67 @@
+from fastapi import APIRouter, Depends
+from sqlalchemy import distinct, func, select
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.models import Course, Learner, LearnerCourseRecord, User
+from app.services.auth import get_current_user
+from app.services.lead_analytics import build_lead_analytics
+from app.services.opportunities import get_all_opportunities
+
+router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
+
+
+@router.get("/summary")
+def dashboard_summary(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    lead_analytics = build_lead_analytics(db, current_user)
+    lead_summary = lead_analytics["summary"]
+
+    if current_user.role != "ADMIN":
+        return {
+            "mode": "COUNSELOR",
+            "assigned_leads": lead_summary["total_leads"],
+            "new_leads": lead_summary["new"],
+            "in_contact_leads": lead_summary["in_contact"],
+            "converted_leads": lead_summary["converted"],
+            "rejected_leads": lead_summary["rejected"],
+            "conversion_rate": lead_summary["conversion_rate"],
+            "email_campaign_activities": lead_summary["email_campaign_activities"],
+            "whatsapp_campaign_activities": lead_summary["whatsapp_campaign_activities"],
+        }
+
+    total_learners = db.scalar(select(func.count()).select_from(Learner)) or 0
+    igc_passed = db.scalar(
+        select(func.count(distinct(LearnerCourseRecord.learner_number)))
+        .select_from(LearnerCourseRecord)
+        .join(Course, LearnerCourseRecord.course_id == Course.id)
+        .where(Course.code == "IGC", LearnerCourseRecord.result == "PASS")
+    ) or 0
+    idp_learners = db.scalar(
+        select(func.count(distinct(LearnerCourseRecord.learner_number)))
+        .select_from(LearnerCourseRecord)
+        .join(Course, LearnerCourseRecord.course_id == Course.id)
+        .where(Course.program_code == "IDP")
+    ) or 0
+
+    opportunity_summary = get_all_opportunities(db, current_user)["summary"]
+    return {
+        "mode": "ADMIN",
+        "total_learners": total_learners,
+        "igc_passed": igc_passed,
+        "idp_learners": idp_learners,
+        "opportunity_learners": opportunity_summary["unique_learners"],
+        "total_opportunities": opportunity_summary["total_opportunities"],
+        "idp_entry_opportunities": opportunity_summary["idp_entry"],
+        "id1_opportunities": opportunity_summary["id1"],
+        "id2_opportunities": opportunity_summary["id2"],
+        "id3_opportunities": opportunity_summary["id3"],
+        "idp_opportunities": opportunity_summary["idp_entry"],
+        "lead_total": lead_summary["total_leads"],
+        "lead_assigned": lead_summary["assigned"],
+        "lead_unassigned": lead_summary["unassigned"],
+        "lead_converted": lead_summary["converted"],
+        "lead_conversion_rate": lead_summary["conversion_rate"],
+    }
