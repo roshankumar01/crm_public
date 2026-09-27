@@ -109,7 +109,7 @@ export default function LeadDetailPage() {
 
   return <div className="page">
     <Link to="/upsell/opportunities" className="back-link">← Back to leads</Link>
-    <div className="profile-hero"><div className="profile-avatar">{learner.name?.charAt(0)?.toUpperCase()}</div><div className="profile-main"><div className="eyebrow">LEAD #{lead.id}</div><h1>{learner.name}</h1><div className="profile-number">Learner #{learner.learner_number} · Target {lead.target_code}</div></div><div className="profile-contact"><div><span>Email</span><strong>{learner.email_id || "—"}</strong></div><div><span>Phone</span><strong>{learner.contact_number || "—"}</strong></div><div><span>Trigger</span><strong>{lead.trigger_date || "—"}</strong></div></div></div>
+    <div className="profile-hero"><div className="profile-avatar">{learner.name?.charAt(0)?.toUpperCase()}</div><div className="profile-main"><div className="eyebrow">LEAD #{lead.id}</div><h1>{learner.name}</h1><div className="profile-number">{learner.learner_number ? `Learner #${learner.learner_number} · ` : ""}Target {lead.target_code}{lead.stage ? ` · Stage ${lead.stage}` : ""}</div></div><div className="profile-contact"><div><span>Email</span><strong>{learner.email_id || "—"}</strong></div><div><span>Phone</span><strong>{learner.contact_number || "—"}</strong></div><div><span>Trigger</span><strong>{lead.trigger_date || "—"}</strong></div></div></div>
     {error && <div className="form-error page-message">{error}</div>}
 
     <div className="crm-grid">
@@ -121,7 +121,7 @@ export default function LeadDetailPage() {
             <div><label>Counselor</label>{isAdmin ? <select value={lead.assigned_to_user_id || ""} disabled={saving} onChange={e => changeAssignment(e.target.value)}><option value="">Unassigned</option>{counselors.map(c => <option key={c.id} value={c.id}>{c.display_name}</option>)}</select> : <div className="readonly-field">{lead.assigned_to_name || "Unassigned"}</div>}</div>
           </div>
           <div className="lead-meta"><span>Current rule opportunity: <strong>{lead.is_active ? "Yes" : "No"}</strong></span><span>Assigned: <strong>{lead.assigned_at ? new Date(lead.assigned_at).toLocaleString() : "—"}</strong></span></div>
-          <Link className="secondary-button" to={`/upsell/learners/${learner.learner_number}`}>View learner lifecycle →</Link>
+          <Link className="secondary-button" to={learner.customer_id ? `/upsell/contacts/${learner.customer_id}` : `/upsell/learners/${learner.learner_number}`}>View learner lifecycle →</Link>
         </div>
 
         <form className="crm-card" onSubmit={submitActivity}>

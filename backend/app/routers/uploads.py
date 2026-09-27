@@ -1,19 +1,105 @@
+from io import BytesIO
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models import (
     Lead, LeadActivity, Learner, LearnerCourseRecord, LearnersCrmEnrollment,
     LearnersCrmProfile, MainCrmActivity, MainCrmLead, MarketingCampaign, UploadBatch, User,
 )
 from app.services.auth import require_admin
 from app.services.importers import import_course_file, list_importers
+from app.services.lead_workflow import mark_opportunities_dirty
+from app.services.upload_jobs import create_job, get_job, update_job
 
 router = APIRouter(prefix="/uploads", tags=["Uploads"])
+
+
+def run_upload_job(job_id, payload, filename, kind, import_type, source_category, mode, unique_number, admin_id):
+    from app.routers import campaigns, learners_crm, main_crm
+
+    with SessionLocal() as db:
+        try:
+            admin = db.get(User, admin_id)
+            upload_file = UploadFile(file=BytesIO(payload), filename=filename)
+            progress = lambda **values: update_job(job_id, **values)
+            if kind == "MAIN_CRM":
+                result = main_crm.upload_leads(source_category, upload_file, mode, unique_number, admin, db, progress)
+            elif kind == "LEARNERS_CRM":
+                result = learners_crm.upload(upload_file, mode, unique_number, admin, db, progress)
+            elif kind == "COURSE":
+                batch = import_course_file(db, import_type, upload_file, progress)
+                result = {"id": batch.id, "rows_total": batch.rows_total,
+                          "rows_imported": batch.rows_imported, "rows_skipped": batch.rows_skipped}
+            else:
+                result = campaigns.upload_marketing_campaigns(upload_file, admin, db, progress)
+            update_job(job_id, status="COMPLETED", processed=result["rows_total"],
+                       rows_total=result["rows_total"], rows_imported=result["rows_imported"],
+                       rows_skipped=result["rows_skipped"], result=result)
+        except Exception as exc:
+            db.rollback()
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            update_job(job_id, status="FAILED", error_message=str(detail))
+
+
+@router.post("/jobs")
+def start_upload_job(
+    background_tasks: BackgroundTasks,
+    file: Annotated[UploadFile, File()],
+    kind: Annotated[str, Form()],
+    import_type: Annotated[str | None, Form()] = None,
+    source_category: Annotated[str | None, Form()] = None,
+    upload_mode: Annotated[str, Form()] = "CREATE",
+    unique_number: Annotated[str | None, Form()] = None,
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    from app.routers.main_crm import SOURCE_CATEGORIES
+    from app.services.importers.registry import get_importer
+
+    kind = kind.strip().upper()
+    mode = upload_mode.strip().upper()
+    if kind not in {"MAIN_CRM", "LEARNERS_CRM", "COURSE", "CAMPAIGN"}:
+        raise HTTPException(status_code=400, detail="Invalid upload kind.")
+    if not (file.filename or "").lower().endswith((".xlsx", ".csv")):
+        raise HTTPException(status_code=400, detail="Only .xlsx and .csv files are supported.")
+    if kind == "MAIN_CRM":
+        if source_category not in SOURCE_CATEGORIES:
+            raise HTTPException(status_code=400, detail="Invalid lead source category.")
+        if mode not in {"CREATE", "UPDATE"}:
+            raise HTTPException(status_code=400, detail="Invalid upload mode.")
+        if mode == "UPDATE" and not db.scalar(select(UploadBatch.id).where(
+            UploadBatch.unique_number == unique_number,
+            UploadBatch.import_type.like("MAIN_CRM_%"),
+            UploadBatch.import_type != "MAIN_CRM_MIGRATION",
+        )):
+            raise HTTPException(status_code=404, detail="Upload number not found.")
+    elif kind == "LEARNERS_CRM":
+        if mode not in {"CREATE", "UPDATE"}:
+            raise HTTPException(status_code=400, detail="Invalid upload mode.")
+        if mode == "UPDATE" and not db.scalar(select(UploadBatch.id).where(
+            UploadBatch.unique_number == unique_number, UploadBatch.import_type == "LEARNERS_CRM"
+        )):
+            raise HTTPException(status_code=404, detail="Learner upload number not found.")
+    elif kind == "COURSE":
+        try:
+            get_importer(import_type or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    update_target = unique_number if mode == "UPDATE" and kind in {"MAIN_CRM", "LEARNERS_CRM"} else None
+    job_id = create_job(kind, file.filename or "unknown", update_target)
+    background_tasks.add_task(run_upload_job, job_id, file.file.read(), file.filename or "unknown",
+                              kind, import_type, source_category, mode, unique_number, admin_user.id)
+    return {"job_id": job_id, "status": "PROCESSING"}
+
+
+@router.get("/jobs/{job_id}")
+def upload_job_progress(job_id: str, admin_user: User = Depends(require_admin)):
+    return get_job(job_id)
 
 
 class ResetUploadsRequest(BaseModel):
@@ -87,6 +173,8 @@ def reset_selected_uploads(
                 db.execute(delete(Learner).where(Learner.learner_number == learner_number))
 
         db.execute(delete(UploadBatch).where(UploadBatch.id.in_(ids)))
+        if affected_learner_numbers or affected_profile_ids:
+            mark_opportunities_dirty(db)
         db.commit()
     except Exception:
         db.rollback()

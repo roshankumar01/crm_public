@@ -3,9 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from sqlalchemy import inspect, text
 from app.database import Base, SessionLocal, engine
-from app.routers import analytics, auth, campaigns, dashboard, learners, learners_crm, leads, main_crm, opportunities, uploads
+from app.models import LEARNERS_CRM_INDEXES, MAIN_CRM_INDEXES, UPSELL_INDEXES, MaintenanceRun
+from app.routers import analytics, auth, campaigns, dashboard, learner_course_mapping, learners, learners_crm, leads, main_crm, opportunities, recommendation_rules, uploads
 
 Base.metadata.create_all(bind=engine)
+for index in (*MAIN_CRM_INDEXES, *LEARNERS_CRM_INDEXES):
+    index.create(bind=engine, checkfirst=True)
 if "marketing_type" not in {column["name"] for column in inspect(engine).get_columns("marketing_campaigns")}:
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE marketing_campaigns ADD COLUMN marketing_type VARCHAR(100) NOT NULL DEFAULT 'Other'"))
@@ -30,6 +33,14 @@ if "customer_id" not in {column["name"] for column in inspect(engine).get_column
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE learners_crm_profiles ADD COLUMN customer_id INTEGER"))
         connection.execute(text("CREATE INDEX ix_learners_crm_profiles_customer_id ON learners_crm_profiles (customer_id)"))
+learner_profile_columns = {column["name"] for column in inspect(engine).get_columns("learners_crm_profiles")}
+if "phone_number" not in learner_profile_columns:
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE learners_crm_profiles ADD COLUMN phone_number VARCHAR(100)"))
+if "normalized_phone" not in learner_profile_columns:
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE learners_crm_profiles ADD COLUMN normalized_phone VARCHAR(40)"))
+        connection.execute(text("CREATE INDEX ix_learners_crm_profiles_normalized_phone ON learners_crm_profiles (normalized_phone)"))
 if "customer_id" not in {column["name"] for column in inspect(engine).get_columns("learners")}:
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE learners ADD COLUMN customer_id INTEGER"))
@@ -38,13 +49,43 @@ if "unique_number" not in {column["name"] for column in inspect(engine).get_colu
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE upload_batches ADD COLUMN unique_number VARCHAR(50)"))
         connection.execute(text("CREATE UNIQUE INDEX ix_upload_batches_unique_number ON upload_batches (unique_number)"))
+if "subcategory_id" not in {column["name"] for column in inspect(engine).get_columns("learner_course_mappings")}:
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE learner_course_mappings ADD COLUMN subcategory_id INTEGER"))
+        connection.execute(text("CREATE INDEX ix_learner_course_mappings_subcategory_id ON learner_course_mappings (subcategory_id)"))
+if "customer_id" not in {column["name"] for column in inspect(engine).get_columns("leads")}:
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE leads ADD COLUMN customer_id INTEGER"))
+        connection.execute(text("CREATE INDEX ix_leads_customer_id ON leads (customer_id)"))
+        connection.execute(text("CREATE INDEX ix_leads_customer_opportunity ON leads (customer_id, opportunity_key)"))
+lead_columns = {column["name"]: column for column in inspect(engine).get_columns("leads")}
+if "stage" not in lead_columns:
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE leads ADD COLUMN stage INTEGER"))
+if "reason" not in lead_columns:
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE leads ADD COLUMN reason TEXT"))
+if engine.dialect.name == "postgresql" and not lead_columns["learner_number"]["nullable"]:
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE leads ALTER COLUMN learner_number DROP NOT NULL"))
+for index in UPSELL_INDEXES:
+    index.create(bind=engine, checkfirst=True)
 with engine.begin() as connection:
     connection.execute(text("UPDATE users SET email = 'person_a@gmail.com' WHERE username = 'person_a' AND email IS NULL"))
     connection.execute(text("UPDATE users SET email = 'person_b@gmail.com' WHERE username = 'person_b' AND email IS NULL"))
 
 from app.services.customer_identity import backfill_customer_links
+from app.services.learner_course_mapping import seed_course_mapping
 with SessionLocal() as session:
-    backfill_customer_links(session)
+    seed_course_mapping(session)
+    if session.get(MaintenanceRun, "customer_links_v1") is None:
+        backfill_customer_links(session)
+        session.add(MaintenanceRun(key="customer_links_v1"))
+        session.commit()
+    if session.get(MaintenanceRun, "migration_status_v2") is None:
+        main_crm.backfill_migration_statuses(session)
+        session.add(MaintenanceRun(key="migration_status_v2"))
+        session.commit()
 
 app = FastAPI(title="Learning CRM API", version="0.2.0")
 app.add_middleware(
@@ -65,6 +106,8 @@ app.include_router(campaigns.router)
 app.include_router(uploads.router)
 app.include_router(main_crm.router)
 app.include_router(learners_crm.router)
+app.include_router(learner_course_mapping.router)
+app.include_router(recommendation_rules.router)
 
 
 @app.get("/health")

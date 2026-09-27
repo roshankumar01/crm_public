@@ -1,22 +1,30 @@
 import re
+import json
 import secrets
+from io import BytesIO
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+import pandas as pd
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import delete, or_, select
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.models import AuthSession, Learner, MainCrmActivity, MainCrmLead, UploadBatch, User
+from app.database import SessionLocal, get_db
+from app.models import AuthSession, Customer, CustomerIdentity, Learner, MainCrmActivity, MainCrmLead, UploadBatch, User
 from app.services.auth import get_current_user, hash_password, require_admin
 from app.services.customer_identity import customer_is_registered, mark_customer_converted, resolve_customer
-from app.services.importers.common import clean, dataframe_row_to_dict, parse_date, read_upload, require_columns
+from app.services.customer_lifecycle import customer_lifecycle
+from app.services.importers.common import clean, dataframe_row_to_dict, parse_date, read_upload, require_columns, upload_rows, UPLOAD_CHUNK_SIZE
 
 router = APIRouter(prefix="/crm/leads", tags=["Main CRM"])
 
 SOURCE_CATEGORIES = {"INFO_EMAIL_LEADS", "LIVE_ONLINE_LEADS", "DIRECT_CALLS", "CAMPAIGN_REPLIES", "CAMPAIGN_DATA"}
+MIGRATION_TYPE = "MAIN_CRM_MIGRATION"
+MIGRATION_CONTACT_COLUMNS = {"email", "emailids", "mobile", "otherphonenumbers"}
+MIGRATION_CHUNK_SIZE = 500
+MIGRATION_PROGRESS = {}
 REQUIRED_COLUMNS = {
     "INFO_EMAIL_LEADS": {"fullname", "email", "phonenumber", "source", "course"},
     "LIVE_ONLINE_LEADS": {"fullname", "email", "phonenumber", "whatsappnumber", "source", "course", "regions", "counsilorname", "country"},
@@ -72,11 +80,88 @@ def row_value(row, *keys):
     return None
 
 
-def lead_dict(lead, counselor=None):
+def migration_category(source):
+    value = (source or "").lower()
+    if any(word in value for word in ("call", "telephone", "phone", "dial", "hotline")):
+        return "DIRECT_CALLS"
+    if any(word in value for word in ("live online", "live-online", "online", "webinar", "virtual")):
+        return "LIVE_ONLINE_LEADS"
+    return "INFO_EMAIL_LEADS"
+
+
+def migration_contact(row):
+    emails = re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", " ".join(filter(None, (row_value(row, "email"), row_value(row, "emailids")))))
+    email = emails[0] if emails else None
+    phones = [re.sub(r"\.0$", "", value) if value else None for value in (row_value(row, "mobile"), row_value(row, "otherphonenumbers"))]
+    phone = next((value for value in phones if value and len(re.sub(r"\D", "", value)) >= 7), None)
+    return email, phone
+
+
+def migration_status(value):
+    status = re.sub(r"\s+", " ", (value or "").strip()).casefold()
+    return {
+        "": "BLANK", "new": "NEW", "no response": "NO_RESPONSE",
+        "no response (rnr)": "NO_RESPONSE", "follow up": "FOLLOW_UP",
+        "later": "LATER", "converted": "CONVERTED",
+        "call me later": "CALL_ME_LATER", "good": "GOOD",
+        "not interested": "NOT_INTERESTED", "invalid": "INVALID", "hot": "HOT",
+    }.get(status, "OTHERS")
+
+
+def previous_migration_status(value):
+    status = (value or "").strip().lower()
+    if any(word in status for word in ("convert", "won", "enrol", "register", "admission")):
+        return "CONVERTED"
+    if any(word in status for word in ("reject", "lost", "not interested", "closed", "invalid")):
+        return "REJECTED"
+    if any(word in status for word in ("follow", "pending", "callback")):
+        return "FOLLOW_UP"
+    if any(word in status for word in ("contact", "discussion", "negotiat")):
+        return "IN_CONTACT"
+    return "NEW"
+
+
+def backfill_migration_statuses(db):
+    rows = db.execute(
+        select(MainCrmLead, MainCrmActivity.raw_data["statusoflead"].as_string())
+        .join(MainCrmActivity, MainCrmActivity.lead_id == MainCrmLead.id)
+        .join(UploadBatch, UploadBatch.id == MainCrmActivity.upload_batch_id)
+        .where(UploadBatch.import_type == MIGRATION_TYPE, MainCrmLead.upload_batch_id == UploadBatch.id)
+        .order_by(MainCrmActivity.id)
+    ).all()
+    seen = set()
+    for lead, original in rows:
+        if lead.id in seen:
+            continue
+        seen.add(lead.id)
+        if lead.status_of_lead == previous_migration_status(original):
+            lead.status_of_lead = migration_status(original)
+    db.commit()
+
+
+def migration_datetime(value):
+    if clean(value) is None:
+        return None
+    text = clean(value)
+    parsed = pd.to_datetime(value, errors="coerce", dayfirst=not bool(re.match(r"^\d{4}-\d{1,2}-\d{1,2}", text)))
+    if pd.isna(parsed):
+        return None
+    result = parsed.to_pydatetime()
+    return result.replace(tzinfo=timezone.utc) if result.tzinfo is None else result
+
+
+def validate_migration_columns(df):
+    require_columns(df, {"name"}, "Old CRM migration")
+    if not MIGRATION_CONTACT_COLUMNS.intersection(df.columns):
+        raise ValueError("Old CRM migration needs at least one contact column: Email, Email IDs, Mobile, or Other Phone numbers.")
+
+
+def lead_dict(lead, counselor=None, is_migrated=False):
     return {
         "id": lead.id, "customer_id": lead.customer_id, "full_name": lead.full_name, "email": lead.email,
         "phone_number": lead.phone_number, "whatsapp_number": lead.whatsapp_number,
         "source_category": lead.source_category, "source": lead.source, "course": lead.course,
+        "is_migrated": is_migrated,
         "region": lead.region, "country": lead.country, "age": lead.age, "status_of_lead": lead.status_of_lead,
         "assigned_to_user_id": lead.assigned_to_user_id,
         "counselor": counselor.display_name if counselor else None,
@@ -139,12 +224,63 @@ def update_counselor(user_id: int, payload: CounselorUpdate, admin: User = Depen
 
 
 @router.get("")
-def list_leads(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    query = select(MainCrmLead, User).outerjoin(User, MainCrmLead.assigned_to_user_id == User.id)
+def list_leads(
+    current_user: User = Depends(get_current_user), db: Session = Depends(get_db),
+    page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
+    source_category: str = Query("ALL"), search: str = Query("", max_length=320),
+):
+    category = source_category.strip().upper()
+    if category not in {"ALL", *SOURCE_CATEGORIES}:
+        raise HTTPException(status_code=400, detail="Invalid lead source category.")
+    filters = []
     if current_user.role != "ADMIN":
-        query = query.where(MainCrmLead.assigned_to_user_id == current_user.id)
-    rows = db.execute(query.order_by(MainCrmLead.updated_at.desc(), MainCrmLead.id.desc())).all()
-    return [lead_dict(lead, counselor) for lead, counselor in rows]
+        filters.append(MainCrmLead.assigned_to_user_id == current_user.id)
+    if category != "ALL":
+        filters.append(MainCrmLead.source_category == category)
+    term = search.strip()
+    if term:
+        pattern = f"%{term}%"
+        searchable = [MainCrmLead.full_name.ilike(pattern), MainCrmLead.email.ilike(pattern),
+                      MainCrmLead.course.ilike(pattern), MainCrmLead.source.ilike(pattern)]
+        digits = normalize_phone(term)
+        if digits and len(digits) >= 3:
+            searchable.append(MainCrmLead.normalized_phone.like(f"%{digits}%"))
+        filters.append(or_(*searchable))
+    total = db.scalar(select(func.count()).select_from(MainCrmLead).where(*filters)) or 0
+    migrated = select(MainCrmActivity.id).where(MainCrmActivity.lead_id == MainCrmLead.id, MainCrmActivity.activity_type == "MIGRATION").exists()
+    query = select(MainCrmLead, User, migrated).outerjoin(User, MainCrmLead.assigned_to_user_id == User.id).where(*filters)
+    rows = db.execute(query.order_by(MainCrmLead.updated_at.desc(), MainCrmLead.id.desc())
+                      .limit(page_size).offset((page - 1) * page_size)).all()
+    return {"items": [lead_dict(lead, counselor, is_migrated) for lead, counselor, is_migrated in rows],
+            "total": total, "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size)}
+
+
+@router.get("/summary")
+def lead_summary(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    filters = [] if current_user.role == "ADMIN" else [MainCrmLead.assigned_to_user_id == current_user.id]
+    rows = db.execute(select(
+        MainCrmLead.source_category, MainCrmLead.status_of_lead, func.count(),
+        func.sum(case((MainCrmLead.matched_learner_number.is_not(None), 1), else_=0)),
+        func.sum(case((MainCrmLead.assigned_to_user_id.is_(None), 1), else_=0)),
+    ).where(*filters).group_by(MainCrmLead.source_category, MainCrmLead.status_of_lead)).all()
+    source_counts = {category: 0 for category in SOURCE_CATEGORIES}
+    source_breakdown = {category: {"total": 0, "converted": 0, "registered": 0} for category in SOURCE_CATEGORIES}
+    status_counts = {}
+    total = registered = unassigned = 0
+    for category, status, count, matched, without_owner in rows:
+        total += count
+        registered += matched or 0
+        unassigned += without_owner or 0
+        source_counts[category] = source_counts.get(category, 0) + count
+        status_counts[status] = status_counts.get(status, 0) + count
+        entry = source_breakdown.setdefault(category, {"total": 0, "converted": 0, "registered": 0})
+        entry["total"] += count
+        entry["registered"] += matched or 0
+        if status == "CONVERTED": entry["converted"] += count
+    return {"total": total, "registered": registered, "unassigned": unassigned,
+            "source_counts": source_counts, "status_counts": status_counts,
+            "source_breakdown": source_breakdown}
 
 
 def activity_dict(activity, lead=None):
@@ -177,7 +313,22 @@ def get_main_crm_lead(lead_id: int, current_user: User = Depends(get_current_use
     activities = db.execute(select(MainCrmActivity).where(MainCrmActivity.lead_id == lead.id).order_by(
         MainCrmActivity.activity_date.desc(), MainCrmActivity.id.desc()
     )).scalars().all()
-    return {"lead": lead_dict(lead, counselor), "activities": [activity_dict(item) for item in activities]}
+    migrated = any(item.activity_type == "MIGRATION" for item in activities)
+    profile = lead_dict(lead, counselor, migrated)
+    if migrated:
+        source_dates = []
+        for item in activities:
+            if item.activity_type != "MIGRATION":
+                continue
+            raw = (item.raw_data or {}).get("updatedat")
+            parsed = migration_datetime(raw)
+            if parsed:
+                source_dates.append((parsed, clean(raw)))
+        latest = max(source_dates, key=lambda item: item[0], default=None)
+        profile["migration_updated_at"] = latest[1] if latest else None
+    return {"lead": profile,
+            "activities": [activity_dict(item) for item in activities],
+            "lifecycle": customer_lifecycle(db, lead.customer_id, current_user)}
 
 
 @router.get("/uploads")
@@ -191,7 +342,266 @@ def list_crm_uploads(admin_user: User = Depends(require_admin), db: Session = De
         "source_category": item.import_type.removeprefix("MAIN_CRM_"), "status": item.status,
         "rows_total": item.rows_total, "rows_imported": item.rows_imported,
         "rows_skipped": item.rows_skipped, "uploaded_at": item.uploaded_at,
+        "error_message": item.error_message,
     } for item in rows]
+
+
+@router.post("/migration-preview")
+def preview_migration(file: Annotated[UploadFile, File()], admin_user: User = Depends(require_admin)):
+    try:
+        df = read_upload(file)
+        validate_migration_columns(df)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    counts = {}
+    for _, row in df.iterrows():
+        source = row_value(row, "source") or ""
+        counts[source] = counts.get(source, 0) + 1
+    return {"rows_total": len(df), "sources": [
+        {"source": source, "count": count, "suggested_category": migration_category(source)}
+        for source, count in sorted(counts.items())
+    ]}
+
+
+def run_background_migration(payload, filename, unique_number, source_categories):
+    with SessionLocal() as db:
+        try:
+            upload = UploadFile(file=BytesIO(payload), filename=filename)
+            result = upload_migration(upload, "UPDATE", unique_number, source_categories, None, db)
+            MIGRATION_PROGRESS[unique_number] = {**MIGRATION_PROGRESS.get(unique_number, {}), "categories": result["categories"]}
+        except Exception as exc:
+            db.rollback()
+            message = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            batch = db.scalar(select(UploadBatch).where(UploadBatch.unique_number == unique_number))
+            if batch:
+                batch.status = "FAILED"
+                batch.error_message = str(message)
+                db.commit()
+            MIGRATION_PROGRESS[unique_number] = {**MIGRATION_PROGRESS.get(unique_number, {}), "error_message": str(message)}
+
+
+@router.post("/migration-start")
+def start_migration(
+    background_tasks: BackgroundTasks,
+    file: Annotated[UploadFile, File()],
+    upload_mode: Annotated[str, Form()] = "CREATE",
+    unique_number: Annotated[str | None, Form()] = None,
+    source_categories: Annotated[str, Form()] = "{}",
+    admin_user: User = Depends(require_admin), db: Session = Depends(get_db),
+):
+    try:
+        df = read_upload(file)
+        validate_migration_columns(df)
+        overrides = json.loads(source_categories)
+        if not isinstance(overrides, dict) or any(value not in {"INFO_EMAIL_LEADS", "LIVE_ONLINE_LEADS", "DIRECT_CALLS"} for value in overrides.values()):
+            raise ValueError("Invalid source category mapping.")
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    file.file.seek(0)
+    payload = file.file.read()
+    mode = upload_mode.strip().upper()
+    if mode == "UPDATE":
+        batch = db.scalar(select(UploadBatch).where(UploadBatch.unique_number == unique_number, UploadBatch.import_type == MIGRATION_TYPE))
+        if not batch:
+            raise HTTPException(status_code=404, detail="Migration upload number not found.")
+        if batch.status == "PROCESSING":
+            raise HTTPException(status_code=409, detail="This migration is already processing.")
+    elif mode == "CREATE":
+        batch = UploadBatch(import_type=MIGRATION_TYPE, unique_number=new_upload_number(db), filename=file.filename or "unknown")
+        db.add(batch)
+    else:
+        raise HTTPException(status_code=400, detail="Upload mode must be CREATE or UPDATE.")
+    batch.filename = file.filename or "unknown"
+    batch.status = "PROCESSING"
+    batch.rows_total = len(df)
+    batch.rows_imported = batch.rows_skipped = 0
+    batch.error_message = None
+    batch.uploaded_at = datetime.now(timezone.utc)
+    db.commit()
+    MIGRATION_PROGRESS[batch.unique_number] = {"processed": 0, "rows_total": len(df), "rows_imported": 0, "rows_skipped": 0}
+    background_tasks.add_task(run_background_migration, payload, file.filename or "migration.xlsx", batch.unique_number, source_categories)
+    return {"unique_number": batch.unique_number, "status": "PROCESSING", "rows_total": len(df)}
+
+
+@router.get("/migration-progress/{unique_number}")
+def migration_progress(unique_number: str, admin_user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    batch = db.scalar(select(UploadBatch).where(UploadBatch.unique_number == unique_number, UploadBatch.import_type == MIGRATION_TYPE))
+    if not batch:
+        raise HTTPException(status_code=404, detail="Migration upload number not found.")
+    progress = MIGRATION_PROGRESS.get(unique_number, {})
+    return {"unique_number": unique_number, "status": batch.status, "rows_total": batch.rows_total,
+            "processed": progress.get("processed", batch.rows_total if batch.status == "COMPLETED" else 0),
+            "rows_imported": progress.get("rows_imported", batch.rows_imported),
+            "rows_skipped": progress.get("rows_skipped", batch.rows_skipped),
+            "error_message": batch.error_message, "categories": progress.get("categories")}
+
+
+@router.post("/migration-upload")
+def upload_migration(
+    file: Annotated[UploadFile, File()],
+    upload_mode: Annotated[str, Form()] = "CREATE",
+    unique_number: Annotated[str | None, Form()] = None,
+    source_categories: Annotated[str, Form()] = "{}",
+    admin_user: User = Depends(require_admin), db: Session = Depends(get_db),
+):
+    try:
+        df = read_upload(file)
+        validate_migration_columns(df)
+        overrides = json.loads(source_categories)
+        if not isinstance(overrides, dict) or any(value not in {"INFO_EMAIL_LEADS", "LIVE_ONLINE_LEADS", "DIRECT_CALLS"} for value in overrides.values()):
+            raise ValueError("Invalid source category mapping.")
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    mode = upload_mode.strip().upper()
+    if mode not in {"CREATE", "UPDATE"}:
+        raise HTTPException(status_code=400, detail="Upload mode must be CREATE or UPDATE.")
+    if mode == "UPDATE":
+        batch = db.scalar(select(UploadBatch).where(UploadBatch.unique_number == unique_number, UploadBatch.import_type == MIGRATION_TYPE))
+        if not batch:
+            raise HTTPException(status_code=404, detail="Migration upload number not found.")
+    else:
+        batch = UploadBatch(import_type=MIGRATION_TYPE, unique_number=new_upload_number(db), filename=file.filename or "unknown", status="PROCESSING")
+        db.add(batch)
+        db.flush()
+    try:
+        if mode == "UPDATE":
+            db.execute(delete(MainCrmActivity).where(MainCrmActivity.upload_batch_id == batch.id))
+            has_other_activity = select(MainCrmActivity.id).where(MainCrmActivity.lead_id == MainCrmLead.id).exists()
+            db.execute(delete(MainCrmLead).where(MainCrmLead.upload_batch_id == batch.id, ~has_other_activity))
+        batch.filename = file.filename or "unknown"
+        batch.status = "PROCESSING"
+        batch.rows_total = len(df)
+        batch.rows_imported = batch.rows_skipped = 0
+        batch.uploaded_at = datetime.now(timezone.utc)
+        counselors = db.execute(select(User).where(User.role == "COUNSELOR", User.active.is_(True))).scalars().all()
+        by_email = {normalize_email(user.email): user for user in counselors if user.email}
+        by_name = {user.display_name.strip().lower(): user for user in counselors}
+        learners = db.execute(select(Learner)).scalars().all()
+        learners_by_email = {normalize_email(item.email_id): item for item in learners if item.email_id}
+        learners_by_phone = {normalize_phone(item.contact_number): item for item in learners if item.contact_number}
+        categories = {"INFO_EMAIL_LEADS": 0, "LIVE_ONLINE_LEADS": 0, "DIRECT_CALLS": 0}
+        customers = {customer.id: customer for customer in db.execute(select(Customer)).scalars()}
+        customer_by_email = {}
+        customer_by_phone = {}
+        for identity_type, normalized, customer_id in db.execute(select(
+            CustomerIdentity.identity_type, CustomerIdentity.normalized_value, CustomerIdentity.customer_id
+        )):
+            customer = customers.get(customer_id)
+            if customer:
+                (customer_by_email if identity_type == "EMAIL" else customer_by_phone)[normalized] = customer
+        lead_by_customer = {}
+        lead_by_email = {}
+        lead_by_phone = {}
+        for existing in db.execute(select(MainCrmLead).order_by(MainCrmLead.id)).scalars():
+            if existing.customer_id: lead_by_customer.setdefault(existing.customer_id, existing)
+            if existing.normalized_email: lead_by_email.setdefault(existing.normalized_email, existing)
+            if existing.normalized_phone: lead_by_phone.setdefault(existing.normalized_phone, existing)
+        MIGRATION_PROGRESS[batch.unique_number] = {"processed": 0, "rows_total": len(df), "rows_imported": 0, "rows_skipped": 0}
+        for start in range(0, len(df), MIGRATION_CHUNK_SIZE):
+            chunk = df.iloc[start:start + MIGRATION_CHUNK_SIZE].to_dict(orient="records")
+            prepared = []
+            new_customers = []
+            new_identities = []
+            for row in chunk:
+                email, phone = migration_contact(row)
+                if not email and not phone:
+                    batch.rows_skipped += 1
+                    continue
+                name = row_value(row, "name")
+                normalized_email = normalize_email(email)
+                normalized_phone = normalize_phone(phone)
+                customer = (customer_by_email.get(normalized_email) if normalized_email else None) or (
+                    customer_by_phone.get(normalized_phone) if normalized_phone else None
+                )
+                if not customer:
+                    customer = Customer(primary_name=name, primary_email=email, primary_phone=phone)
+                    new_customers.append(customer)
+                else:
+                    if name: customer.primary_name = name
+                    if email: customer.primary_email = email
+                    if phone: customer.primary_phone = phone
+                if normalized_email and normalized_email not in customer_by_email:
+                    customer_by_email[normalized_email] = customer
+                    new_identities.append(("EMAIL", normalized_email, email, customer))
+                if normalized_phone and normalized_phone not in customer_by_phone:
+                    customer_by_phone[normalized_phone] = customer
+                    new_identities.append(("PHONE", normalized_phone, phone, customer))
+                prepared.append((row, email, phone, normalized_email, normalized_phone, customer))
+            if new_customers:
+                db.add_all(new_customers)
+                db.flush()
+                customers.update((customer.id, customer) for customer in new_customers)
+            if new_identities:
+                db.add_all(CustomerIdentity(customer_id=customer.id, identity_type=kind, normalized_value=value, raw_value=raw)
+                           for kind, value, raw, customer in new_identities)
+            new_leads = []
+            activities = []
+            for row, email, phone, normalized_email, normalized_phone, customer in prepared:
+                source = row_value(row, "source") or ""
+                category = overrides.get(source, migration_category(source))
+                candidates = [item for item in (
+                    lead_by_customer.get(customer.id),
+                    lead_by_email.get(normalized_email) if normalized_email else None,
+                    lead_by_phone.get(normalized_phone) if normalized_phone else None,
+                ) if item]
+                lead = min(candidates, key=lambda item: item.id if item.id is not None else float("inf")) if candidates else None
+                counselor = by_email.get(normalize_email(row_value(row, "owneremail"))) or by_name.get((row_value(row, "salesowner") or "").lower())
+                learner = learners_by_email.get(normalized_email) if normalized_email else None
+                if not learner and normalized_phone: learner = learners_by_phone.get(normalized_phone)
+                try:
+                    age = int(float(row_value(row, "age"))) if row_value(row, "age") else None
+                    if age is not None and not 0 <= age <= 120: age = None
+                except ValueError:
+                    age = None
+                values = {
+                    "full_name": row_value(row, "name") or "Unknown", "email": email, "normalized_email": normalized_email,
+                    "phone_number": phone, "normalized_phone": normalized_phone, "customer_id": customer.id,
+                    "source_category": category, "source": source or category.replace("_", " ").title(),
+                    "course": row_value(row, "coursename"), "region": row_value(row, "regions"),
+                    "age": age, "status_of_lead": migration_status(row_value(row, "statusoflead")),
+                    "assigned_to_user_id": counselor.id if counselor else None,
+                    "sales_owner": row_value(row, "salesowner"), "notes": row_value(row, "recentnote"),
+                    "matched_learner_number": learner.learner_number if learner else None,
+                    "upload_batch_id": batch.id,
+                }
+                migration_created = migration_datetime(row.get("createdat"))
+                if lead:
+                    for key, value in values.items():
+                        if key in {"customer_id", "source_category", "source", "status_of_lead", "upload_batch_id"}:
+                            continue
+                        if value is not None and getattr(lead, key) in (None, "", "Unknown"):
+                            setattr(lead, key, value)
+                else:
+                    updated = migration_datetime(row.get("updatedat"))
+                    if migration_created: values["created_at"] = migration_created
+                    if updated: values["updated_at"] = updated
+                    lead = MainCrmLead(**values)
+                    new_leads.append(lead)
+                    lead_by_customer.setdefault(customer.id, lead)
+                    if normalized_email: lead_by_email.setdefault(normalized_email, lead)
+                    if normalized_phone: lead_by_phone.setdefault(normalized_phone, lead)
+                activities.append((lead, row, source, migration_created))
+                batch.rows_imported += 1
+                categories[category] += 1
+            if new_leads:
+                db.add_all(new_leads)
+            db.flush()
+            db.add_all(MainCrmActivity(
+                lead_id=lead.id, upload_batch_id=batch.id, activity_type="MIGRATION",
+                activity_date=created.date() if created else None, channel=source[:50] or None,
+                course=row_value(row, "coursename"), full_user_reply=row_value(row, "message"),
+                notes=row_value(row, "recentnote"), raw_data=dataframe_row_to_dict(row),
+            ) for lead, row, source, created in activities)
+            db.flush()
+            MIGRATION_PROGRESS[batch.unique_number] = {"processed": min(start + MIGRATION_CHUNK_SIZE, len(df)),
+                "rows_total": len(df), "rows_imported": batch.rows_imported, "rows_skipped": batch.rows_skipped}
+        batch.status = "COMPLETED"
+        db.commit()
+        return {"unique_number": batch.unique_number, "rows_total": batch.rows_total,
+                "rows_imported": batch.rows_imported, "rows_skipped": batch.rows_skipped, "categories": categories}
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/upload")
@@ -200,6 +610,7 @@ def upload_leads(
     upload_mode: Annotated[str, Form()] = "CREATE",
     unique_number: Annotated[str | None, Form()] = None,
     admin_user: User = Depends(require_admin), db: Session = Depends(get_db),
+    progress=None,
 ):
     category = source_category.strip().upper()
     if category not in SOURCE_CATEGORIES:
@@ -208,7 +619,7 @@ def upload_leads(
     if mode == "UPDATE":
         if not unique_number:
             raise HTTPException(status_code=400, detail="Choose the upload number to update.")
-        batch = db.scalar(select(UploadBatch).where(UploadBatch.unique_number == unique_number, UploadBatch.import_type.like("MAIN_CRM_%")))
+        batch = db.scalar(select(UploadBatch).where(UploadBatch.unique_number == unique_number, UploadBatch.import_type.like("MAIN_CRM_%"), UploadBatch.import_type != MIGRATION_TYPE))
         if not batch:
             raise HTTPException(status_code=404, detail="Upload number not found.")
         db.execute(delete(MainCrmActivity).where(MainCrmActivity.upload_batch_id == batch.id))
@@ -228,6 +639,8 @@ def upload_leads(
         if category == "DIRECT_CALLS" and "fullname" not in df.columns and "fullnmae" not in df.columns:
             raise ValueError("Direct calls file is missing required column: full_name")
         require_columns(df, REQUIRED_COLUMNS[category], category.replace("_", " ").title())
+        if progress:
+            progress(rows_total=len(df))
         imported = skipped = 0
         counselors = db.execute(select(User).where(User.role == "COUNSELOR", User.active.is_(True))).scalars().all()
         by_email = {normalize_email(u.email): u for u in counselors if u.email}
@@ -235,10 +648,13 @@ def upload_leads(
         learners = db.execute(select(Learner)).scalars().all()
         learners_by_email = {normalize_email(item.email_id): item for item in learners if item.email_id}
         learners_by_phone = {normalize_phone(item.contact_number): item for item in learners if item.contact_number}
-        for _, row in df.iterrows():
+        for processed, row in upload_rows(df):
             email = normalize_email(row.get("email")); phone = normalize_phone(row_value(row, "phonenumber", "phone"))
             if not email and not phone:
-                skipped += 1; continue
+                skipped += 1
+                if progress and (processed % UPLOAD_CHUNK_SIZE == 0 or processed == len(df)):
+                    progress(processed=processed, rows_imported=imported, rows_skipped=skipped)
+                continue
             customer = resolve_customer(db, row_value(row, "fullname", "fullnmae"), clean(row.get("email")), row_value(row, "phonenumber", "phone"))
             match_conditions = [MainCrmLead.customer_id == customer.id]
             if email: match_conditions.append(MainCrmLead.normalized_email == email)
@@ -285,6 +701,10 @@ def upload_leads(
                 notes=row_value(row, "comment", "note", "notes"), raw_data=dataframe_row_to_dict(row),
             ))
             imported += 1
+            if processed % UPLOAD_CHUNK_SIZE == 0 or processed == len(df):
+                db.flush()
+                if progress:
+                    progress(processed=processed, rows_imported=imported, rows_skipped=skipped)
         batch.rows_imported = imported; batch.rows_skipped = skipped; batch.status = "COMPLETED"
         db.commit()
         return {"unique_number": batch.unique_number, "rows_total": batch.rows_total, "rows_imported": imported, "rows_skipped": skipped}

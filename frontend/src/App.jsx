@@ -8,17 +8,17 @@ import LearnerDetailPage from "./pages/LearnerDetailPage.jsx";
 import LearnersPage from "./pages/LearnersPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import OpportunitiesPage from "./pages/OpportunitiesPage.jsx";
-import UploadsPage from "./pages/UploadsPage.jsx";
-import CampaignsPage from "./pages/CampaignsPage.jsx";
 import MainCrmPage from "./pages/MainCrmPage.jsx";
 import MainCrmOverviewPage from "./pages/MainCrmOverviewPage.jsx";
 import MainCrmAnalyticsPage from "./pages/MainCrmAnalyticsPage.jsx";
-import MainCrmUploadsPage from "./pages/MainCrmUploadsPage.jsx";
-import MainCrmCampaignsPage from "./pages/MainCrmCampaignsPage.jsx";
-import CounselorMappingPage from "./pages/CounselorMappingPage.jsx";
+import SettingsPage from "./pages/SettingsPage.jsx";
+import CourseMappingSettingsPage from "./pages/CourseMappingSettingsPage.jsx";
+import RecommendationRulesSettingsPage from "./pages/RecommendationRulesSettingsPage.jsx";
 import MainCrmLeadDetailPage from "./pages/MainCrmLeadDetailPage.jsx";
 import LearnersCrmOverviewPage from "./pages/LearnersCrmOverviewPage.jsx";
-import LearnersCrmUploadsPage from "./pages/LearnersCrmUploadsPage.jsx";
+import LearnersCrmSearchPage from "./pages/LearnersCrmSearchPage.jsx";
+import LearnersCrmDetailPage from "./pages/LearnersCrmDetailPage.jsx";
+import DataUploadsPage from "./pages/DataUploadsPage.jsx";
 
 function RequireAuth() {
   const { user, loading } = useAuth();
@@ -43,25 +43,33 @@ export default function App() {
               <Route path="/crm/leads" element={<MainCrmPage />} />
               <Route path="/crm/leads/:leadId" element={<MainCrmLeadDetailPage />} />
               <Route path="/crm/analytics" element={<MainCrmAnalyticsPage />} />
-              <Route path="/crm/campaigns" element={<MainCrmCampaignsPage />} />
+              <Route path="/crm/campaigns" element={<Navigate to="/crm" replace />} />
               <Route element={<RequireAdmin />}>
-                <Route path="/crm/uploads" element={<MainCrmUploadsPage />} />
-                <Route path="/crm/mapping" element={<CounselorMappingPage />} />
+                <Route path="/crm/uploads" element={<DataUploadsPage />} />
+                <Route path="/crm/settings" element={<SettingsPage />} />
+                <Route path="/crm/settings/course-mapping" element={<CourseMappingSettingsPage />} />
+                <Route path="/crm/settings/recommendation-rules" element={<RecommendationRulesSettingsPage />} />
+                <Route path="/crm/mapping" element={<Navigate to="/crm/settings" replace />} />
               </Route>
               <Route path="/upsell" element={<DashboardPage />} />
               <Route path="/upsell/opportunities" element={<OpportunitiesPage />} />
               <Route path="/upsell/opportunities/idp" element={<OpportunitiesPage />} />
               <Route path="/upsell/leads/:leadId" element={<LeadDetailPage />} />
               <Route path="/upsell/lead-analytics" element={<LeadAnalyticsPage />} />
-              <Route path="/upsell/campaigns" element={<CampaignsPage />} />
+              <Route path="/upsell/campaigns" element={<Navigate to="/upsell" replace />} />
               <Route path="/upsell/learners/:learnerNumber" element={<LearnerDetailPage />} />
+              <Route path="/upsell/contacts/:customerId" element={<LearnerDetailPage />} />
               <Route element={<RequireAdmin />}>
                 <Route path="/upsell/learners" element={<LearnersPage />} />
-                <Route path="/upsell/uploads" element={<UploadsPage />} />
+                <Route path="/upsell/uploads" element={<Navigate to="/crm/uploads?section=upsell" replace />} />
               </Route>
-              <Route path="/learners-crm" element={<LearnersCrmOverviewPage />} />
-              <Route element={<RequireAdmin />}>
-                <Route path="/learners-crm/uploads" element={<LearnersCrmUploadsPage />} />
+              <Route path="/learners-crm">
+                <Route index element={<LearnersCrmOverviewPage />} />
+                <Route path="learners" element={<LearnersCrmSearchPage />} />
+                <Route path="learners/:learnerId" element={<LearnersCrmDetailPage />} />
+                <Route element={<RequireAdmin />}>
+                  <Route path="uploads" element={<Navigate to="/crm/uploads?section=learners" replace />} />
+                </Route>
               </Route>
             </Route>
           </Route>

@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy import distinct, func, select
+from sqlalchemy import func, select, union
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Course, Learner, LearnerCourseRecord, User
+from app.models import Learner, LearnersCrmProfile, User
 from app.services.auth import get_current_user
 from app.services.lead_analytics import build_lead_analytics
 from app.services.opportunities import get_all_opportunities
@@ -32,33 +32,18 @@ def dashboard_summary(
             "whatsapp_campaign_activities": lead_summary["whatsapp_campaign_activities"],
         }
 
-    total_learners = db.scalar(select(func.count()).select_from(Learner)) or 0
-    igc_passed = db.scalar(
-        select(func.count(distinct(LearnerCourseRecord.learner_number)))
-        .select_from(LearnerCourseRecord)
-        .join(Course, LearnerCourseRecord.course_id == Course.id)
-        .where(Course.code == "IGC", LearnerCourseRecord.result == "PASS")
-    ) or 0
-    idp_learners = db.scalar(
-        select(func.count(distinct(LearnerCourseRecord.learner_number)))
-        .select_from(LearnerCourseRecord)
-        .join(Course, LearnerCourseRecord.course_id == Course.id)
-        .where(Course.program_code == "IDP")
-    ) or 0
-
+    linked_customers = union(
+        select(Learner.customer_id).where(Learner.customer_id.is_not(None)),
+        select(LearnersCrmProfile.customer_id).where(LearnersCrmProfile.customer_id.is_not(None)),
+    ).subquery()
+    total_learners = db.scalar(select(func.count()).select_from(linked_customers)) or 0
     opportunity_summary = get_all_opportunities(db, current_user)["summary"]
     return {
         "mode": "ADMIN",
         "total_learners": total_learners,
-        "igc_passed": igc_passed,
-        "idp_learners": idp_learners,
         "opportunity_learners": opportunity_summary["unique_learners"],
         "total_opportunities": opportunity_summary["total_opportunities"],
-        "idp_entry_opportunities": opportunity_summary["idp_entry"],
-        "id1_opportunities": opportunity_summary["id1"],
-        "id2_opportunities": opportunity_summary["id2"],
-        "id3_opportunities": opportunity_summary["id3"],
-        "idp_opportunities": opportunity_summary["idp_entry"],
+        "course_opportunities": opportunity_summary["by_target"],
         "lead_total": lead_summary["total_leads"],
         "lead_assigned": lead_summary["assigned"],
         "lead_unassigned": lead_summary["unassigned"],

@@ -1,11 +1,13 @@
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import UploadBatch
-from app.services.importers.common import dataframe_row_to_dict, read_upload, save_record
+from app.models import Course, LearnerCourseRecord, UploadBatch
+from app.services.importers.common import dataframe_row_to_dict, read_upload, save_record, upload_chunks
 from app.services.importers.registry import get_importer
+from app.services.lead_workflow import mark_opportunities_dirty
 
 
-def import_course_file(db: Session, import_type: str, upload_file):
+def import_course_file(db: Session, import_type: str, upload_file, progress=None):
     importer = get_importer(import_type)
 
     batch = UploadBatch(
@@ -21,26 +23,36 @@ def import_course_file(db: Session, import_type: str, upload_file):
         df = read_upload(upload_file)
         batch.rows_total = len(df)
         importer.validate_columns(df)
+        if progress:
+            progress(rows_total=len(df))
 
         imported = 0
         skipped = 0
+        course_cache = {course.code: course for course in db.scalars(select(Course))}
+        known_hashes = set(db.scalars(select(LearnerCourseRecord.row_hash)))
 
-        for _, row in df.iterrows():
-            raw_data = dataframe_row_to_dict(row)
-            normalized_records = importer.parse_row(row)
-            if not normalized_records:
-                skipped += 1
-                continue
-
-            for normalized in normalized_records:
-                if save_record(db, normalized, raw_data, batch.id):
-                    imported += 1
-                else:
+        for processed, rows in upload_chunks(df):
+            for row in rows:
+                raw_data = dataframe_row_to_dict(row)
+                normalized_records = importer.parse_row(row)
+                if not normalized_records:
                     skipped += 1
+                    continue
+
+                for normalized in normalized_records:
+                    if save_record(db, normalized, raw_data, batch.id, course_cache, known_hashes):
+                        imported += 1
+                    else:
+                        skipped += 1
+            db.flush()
+            if progress:
+                progress(processed=processed, rows_imported=imported, rows_skipped=skipped)
 
         batch.rows_imported = imported
         batch.rows_skipped = skipped
         batch.status = "COMPLETED"
+        if imported:
+            mark_opportunities_dirty(db)
         db.commit()
         db.refresh(batch)
         return batch

@@ -100,6 +100,22 @@ def read_upload(upload_file):
     return df
 
 
+UPLOAD_CHUNK_SIZE = 500
+
+
+def upload_chunks(frame):
+    """Convert only one slice at a time; yield the row count after each slice."""
+    for start in range(0, len(frame), UPLOAD_CHUNK_SIZE):
+        rows = frame.iloc[start:start + UPLOAD_CHUNK_SIZE].to_dict(orient="records")
+        yield min(start + UPLOAD_CHUNK_SIZE, len(frame)), rows
+
+
+def upload_rows(frame):
+    for end, rows in upload_chunks(frame):
+        for row_number, row in enumerate(rows, end - len(rows) + 1):
+            yield row_number, row
+
+
 def require_columns(df, required_columns, importer_name):
     missing = set(required_columns) - set(df.columns)
     if missing:
@@ -137,8 +153,12 @@ def upsert_learner(
 ):
     from app.services.customer_identity import mark_customer_converted, resolve_customer
 
-    customer = resolve_customer(db, name, email_id, contact_number)
     learner = db.get(Learner, learner_number)
+    # IGC and IDIP board rows share learner_number. Keep that link even when
+    # a later result has a changed or missing email/phone. Other course uploads
+    # do not call this importer and continue to match by email or phone.
+    customer = resolve_customer(db, name, email_id, contact_number,
+                                preferred_customer_id=learner.customer_id if learner else None)
     if not learner:
         learner = Learner(
             learner_number=learner_number,
@@ -182,9 +202,9 @@ def create_row_hash(learner_number, course_code, event_date, result, enrollment_
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def save_record(db: Session, normalized, raw_data, upload_batch_id):
+def save_record(db: Session, normalized, raw_data, upload_batch_id, course_cache=None, known_hashes=None):
     course_code = normalized["course_code"]
-    course = get_course(db, course_code)
+    course = course_cache.get(course_code) if course_cache is not None else get_course(db, course_code)
     if not course:
         raise ValueError(
             f"Course '{course_code}' does not exist in the courses table. Add/seed the course first."
@@ -210,9 +230,14 @@ def save_record(db: Session, normalized, raw_data, upload_batch_id):
         details=normalized.get("details", {}),
     )
 
-    existing = db.scalar(select(LearnerCourseRecord).where(LearnerCourseRecord.row_hash == row_hash))
+    existing = row_hash in known_hashes if known_hashes is not None else db.scalar(
+        select(LearnerCourseRecord.id).where(LearnerCourseRecord.row_hash == row_hash)
+    )
     if existing:
         return False
+
+    if known_hashes is not None:
+        known_hashes.add(row_hash)
 
     db.add(LearnerCourseRecord(
         learner_number=normalized["learner_number"],

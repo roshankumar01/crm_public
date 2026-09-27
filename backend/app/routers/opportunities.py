@@ -24,4 +24,4 @@ def get_old_idp_opportunities(
 ):
     data = get_all_opportunities(db, current_user)
     section = next((section for section in data["sections"] if section["key"] == "IDP_ENTRY"), None)
-    return section["leads"] if section else []
+    return {"count": section["count"] if section else 0, "section": "IDP_ENTRY"}

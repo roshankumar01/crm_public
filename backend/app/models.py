@@ -7,6 +7,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -90,6 +91,13 @@ class UploadBatch(Base):
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class MaintenanceRun(Base):
+    __tablename__ = "maintenance_runs"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class LearnerCourseRecord(Base):
     __tablename__ = "learner_course_records"
 
@@ -141,14 +149,18 @@ class Lead(Base):
     __tablename__ = "leads"
     __table_args__ = (
         UniqueConstraint("learner_number", "opportunity_key", name="uq_lead_learner_opportunity"),
+        Index("ix_leads_customer_opportunity", "customer_id", "opportunity_key"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    learner_number: Mapped[str] = mapped_column(
-        ForeignKey("learners.learner_number", ondelete="CASCADE"), nullable=False, index=True
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id", ondelete="SET NULL"), nullable=True, index=True)
+    learner_number: Mapped[str | None] = mapped_column(
+        ForeignKey("learners.learner_number", ondelete="SET NULL"), nullable=True, index=True
     )
     opportunity_key: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     target_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    stage: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     trigger_date: Mapped[date | None] = mapped_column(Date, index=True)
     status: Mapped[str] = mapped_column(String(30), default="NEW", nullable=False, index=True)
     assigned_to_user_id: Mapped[int | None] = mapped_column(
@@ -192,6 +204,18 @@ class MarketingCampaign(Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+UPSELL_INDEXES = (
+    Index("ix_leads_active_updated_id", Lead.is_active, Lead.updated_at.desc(), Lead.id.desc()),
+    Index("ix_leads_active_key_stage_trigger", Lead.is_active, Lead.opportunity_key, Lead.stage, Lead.trigger_date),
+    Index("ix_leads_owner_active_updated", Lead.assigned_to_user_id, Lead.is_active, Lead.updated_at.desc()),
+    Index("ix_leads_customer_active", Lead.customer_id, Lead.is_active),
+    Index("ix_lead_activities_lead_type", LeadActivity.lead_id, LeadActivity.activity_type),
+    Index("ix_marketing_campaigns_learner_created", MarketingCampaign.learner_number, MarketingCampaign.created_at.desc(), MarketingCampaign.id.desc()),
+    Index("ix_customers_updated_id", Customer.updated_at.desc(), Customer.id.desc()),
+    Index("ix_learner_course_records_number_date", LearnerCourseRecord.learner_number, LearnerCourseRecord.event_date.desc()),
+)
 
 
 class MainCrmLead(Base):
@@ -247,6 +271,16 @@ class MainCrmActivity(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+MAIN_CRM_INDEXES = (
+    Index("ix_main_crm_leads_updated_id", MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()),
+    Index("ix_main_crm_leads_source_updated_id", MainCrmLead.source_category, MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()),
+    Index("ix_main_crm_leads_owner_updated_id", MainCrmLead.assigned_to_user_id, MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()),
+    Index("ix_main_crm_leads_source_status", MainCrmLead.source_category, MainCrmLead.status_of_lead),
+    Index("ix_main_crm_activities_lead_type", MainCrmActivity.lead_id, MainCrmActivity.activity_type),
+    Index("ix_main_crm_activities_lead_date", MainCrmActivity.lead_id, MainCrmActivity.activity_date.desc(), MainCrmActivity.id.desc()),
+)
+
+
 class LearnersCrmProfile(Base):
     __tablename__ = "learners_crm_profiles"
 
@@ -255,6 +289,8 @@ class LearnersCrmProfile(Base):
     learner_name: Mapped[str] = mapped_column(String(255), nullable=False)
     email_id: Mapped[str] = mapped_column(String(320), nullable=False)
     normalized_email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    phone_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    normalized_phone: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -272,3 +308,47 @@ class LearnersCrmEnrollment(Base):
     upload_batch_id: Mapped[int | None] = mapped_column(ForeignKey("upload_batches.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+LEARNERS_CRM_INDEXES = (
+    Index("ix_learners_crm_enrollments_learner_updated", LearnersCrmEnrollment.learner_id, LearnersCrmEnrollment.updated_at.desc()),
+    Index("ix_learners_crm_enrollments_learner_date", LearnersCrmEnrollment.learner_id, LearnersCrmEnrollment.enrolment_date.desc()),
+    Index("ix_learners_crm_profiles_updated_id", LearnersCrmProfile.updated_at.desc(), LearnersCrmProfile.id.desc()),
+)
+
+
+class LearnerCourseCategory(Base):
+    __tablename__ = "learner_course_categories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    display_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class LearnerCourseSubcategory(Base):
+    __tablename__ = "learner_course_subcategories"
+    __table_args__ = (UniqueConstraint("category_id", "normalized_name", name="uq_learner_course_subcategory"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    category_id: Mapped[int] = mapped_column(ForeignKey("learner_course_categories.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    display_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class LearnerCourseMapping(Base):
+    __tablename__ = "learner_course_mappings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    category_id: Mapped[int] = mapped_column(ForeignKey("learner_course_categories.id", ondelete="RESTRICT"), nullable=False, index=True)
+    subcategory_id: Mapped[int | None] = mapped_column(ForeignKey("learner_course_subcategories.id", ondelete="RESTRICT"), nullable=True, index=True)
+    course_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(500), unique=True, nullable=False, index=True)
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[str] = mapped_column(String(500), nullable=False)

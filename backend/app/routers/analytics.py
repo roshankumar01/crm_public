@@ -7,9 +7,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Lead, LeadActivity, Learner, MarketingCampaign, User
+from app.models import Customer, Lead, LeadActivity, Learner, MarketingCampaign, User
 from app.services.auth import get_current_user
 from app.services.lead_analytics import build_lead_analytics, scoped_leads
+from app.services.opportunities import section_key
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
@@ -31,7 +32,7 @@ def export_lead_analytics(
     analytics = build_lead_analytics(db, current_user)
     leads = scoped_leads(db, current_user)
     if opportunity_key:
-        leads = [lead for lead in leads if lead.opportunity_key == opportunity_key and lead.is_active]
+        leads = [lead for lead in leads if section_key(lead.opportunity_key, lead.stage) == opportunity_key and lead.is_active]
     lead_ids = [lead.id for lead in leads]
 
     learners = {}
@@ -44,6 +45,9 @@ def export_lead_analytics(
             ).scalars().all()
         }
 
+    customer_ids = {lead.customer_id for lead in leads if lead.customer_id}
+    customers = {customer.id: customer for customer in db.scalars(select(Customer).where(Customer.id.in_(customer_ids)))} if customer_ids else {}
+
     counselor_ids = {lead.assigned_to_user_id for lead in leads if lead.assigned_to_user_id}
     counselors = {}
     if counselor_ids:
@@ -55,13 +59,14 @@ def export_lead_analytics(
     lead_rows = []
     for lead in leads:
         learner = learners.get(lead.learner_number)
+        customer = customers.get(lead.customer_id)
         counselor = counselors.get(lead.assigned_to_user_id)
         lead_rows.append({
             "Lead ID": lead.id,
             "Learner Number": lead.learner_number,
-            "Learner Name": learner.name if learner else "",
-            "Email": learner.email_id if learner else "",
-            "Phone": learner.contact_number if learner else "",
+            "Learner Name": customer.primary_name if customer else learner.name if learner else "",
+            "Email": customer.primary_email if customer else learner.email_id if learner else "",
+            "Phone": customer.primary_phone if customer else learner.contact_number if learner else "",
             "Opportunity": lead.opportunity_key,
             "Target": lead.target_code,
             "Trigger Date": lead.trigger_date,

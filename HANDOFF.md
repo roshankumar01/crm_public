@@ -665,15 +665,18 @@ Do not add ML yet unless explicitly requested.
 The authenticated application now has three connected workspaces selected from the sidebar:
 
 - **Main CRM (`/crm`)** manages people who have enquired but may not yet be registered.
-- **Learners CRM (`/learners-crm`)** is the new central workspace intended for uploading and managing all registered learners.
+- **Learners CRM (`/learners-crm`)** is the central workspace for viewing registered learner data; its uploads are managed from Main CRM.
 - **Upsell CRM (`/upsell`)** preserves the original registered-learner and course-opportunity system.
 
 Learners CRM now contains an active learner-import foundation:
 
 - `/learners-crm` — overview with unique learner, enrolment, active, completed, and Main CRM match totals.
-- `/learners-crm/uploads` — admin-only new/update learner Excel imports with upload references.
+- `/learners-crm/learners` — shows 25 learners ordered by their most recently updated enrolment by default and supports search by email, phone number, or enrolment ID.
+- `/crm/uploads?section=learners` — admin-only new/update learner Excel imports with upload references. The former `/learners-crm/uploads` URL redirects here.
 
-Learner upload columns are `enrolment_id`, `learner_name`, `email_id`, `course_name`, `enrolment_date`, `start_date`, `completion_date`, and `completion_status`. A person is uniquely identified by normalized `email_id`; `enrolment_id` uniquely identifies each course enrolment, allowing one learner to have multiple courses. New files receive an `LCRM-...` upload number, and Update mode replaces the selected upload transactionally.
+Learner upload columns are `enrolment_id`, `learner_name`, `email_id`, optional `phone_number`, `course_name`, `enrolment_date`, `start_date`, `completion_date`, and `completion_status`. A person is uniquely identified by normalized `email_id`; `enrolment_id` uniquely identifies each course enrolment, allowing one learner to have multiple courses. New files receive an `LCRM-...` upload number, and Update mode replaces the selected upload transactionally. The overview counts each enrolment separately: `Not Completed` is active and `Completed` is completed.
+
+The initial learner course mapping is bundled in `backend/app/data/learner_course_mapping.tsv` (146 course names in 15 categories from the supplied list). Startup seeds it once into `learner_course_categories` and `learner_course_mappings`, recording completion in `app_settings`. Later startup runs preserve admin edits. Course matching ignores case, Unicode compatibility differences, and repeated whitespace while preserving the uploaded course name. Learner search and overview resolve categories from the current mapping, so moving, renaming, adding, or removing a mapping changes the displayed category for existing enrolments without reuploading files. Unknown course names remain imported and appear as Unmapped. Admins manage categories and courses at `/crm/settings/course-mapping`.
 
 Learners CRM stores data separately in `learners_crm_profiles` and `learners_crm_enrollments`. This avoids treating an enrolment ID as a person ID and keeps the existing Upsell CRM course-history tables intact.
 
@@ -682,12 +685,12 @@ Main CRM routes:
 - `/crm` — enquiry overview and headline metrics.
 - `/crm/leads` — searchable lead pipeline with status and counselor assignment.
 - `/crm/leads/:leadId` — complete enquiry/call/campaign lifecycle.
-- `/crm/campaigns` — campaigns sent and campaign replies.
+- `/crm/campaigns` — redirects to the Main CRM overview; campaign events remain visible in lead lifecycles.
 - `/crm/analytics` — source, conversion, registration, and assignment reporting.
-- `/crm/uploads` — admin-only new/update Excel uploads.
-- `/crm/mapping` — admin-only counselor-account and territory mapping.
+- `/crm/uploads` — admin-only upload center for Main CRM, Learners CRM, and Upsell CRM files, with separate sections and one data reset control.
+- `/crm/settings` — admin-only settings pages for counselor mapping and learner course mapping. The former `/crm/mapping` URL redirects here.
 
-Upsell routes are the original routes prefixed with `/upsell`, including overview, learners, opportunities, campaigns, analytics, and uploads.
+Upsell routes are prefixed with `/upsell`, including overview, learners, lead pipeline, and analytics. The lead pipeline opens on All leads, with Opportunities as the second view. The former `/upsell/campaigns` page redirects to the overview; campaign activity remains visible in lead records. Upsell course and marketing uploads are at `/crm/uploads?section=upsell`; the former `/upsell/uploads` URL redirects there.
 
 ## Main CRM identity and learner matching
 
@@ -775,6 +778,24 @@ The script is idempotent and creates or updates 17 counselor accounts. All curre
 ## Database initialization
 
 The application currently uses `Base.metadata.create_all()` plus small startup column checks for compatibility with the existing database. Added tables are created on backend startup, and the `users.country`, `users.region`, `users.email`, and `upload_batches.unique_number` columns are added when absent. Alembic remains the recommended future production migration system.
+
+## Large database performance
+
+Main CRM lead lists now use server-side search and 50-row pages. The overview and analytics pages use grouped database counts rather than downloading every lead. Indexes support recent lead order, source and counselor filters, and lead activity lookups. The selected source, search, and page are kept in the URL so returning from a lead profile restores the same list.
+
+The existing `customers` and `customer_identities` tables are the central person/contact entity. Main CRM leads, Learners CRM profiles, external-board learners, and upsell opportunities link through `customer_id`. An upsell lead's board `learner_number` is optional, so a customer imported only through Learners CRM can still receive recommendations. Learners CRM completion remains counted per enrolment. Legacy customer-link and migration-status backfills are recorded in `maintenance_runs` so they run once. New uploads create customer links directly.
+
+Upsell opportunity generation now reads both Learners CRM enrolments and board results for each customer. The bundled three-level mapping in `backend/app/data/learner_course_mapping_v2.tsv` replaces the old mapping once at startup; admins can then edit main categories, subcategories, and courses in Settings. Stage 1 subcategories mature after the configurable cooling period (default 60 days) and offer IGC, PSM, and Incident Investigation. An IGC pass offers stage 3 PSM, Incident Investigation, and IDIP entry. A passed IDIP unit offers the remaining unenrolled units. Already enrolled target courses are excluded. The course revision, rules version, and next cooling eligibility date are tracked in `app_settings`; opportunity refreshes occur after an upload, a rule change, or an actual eligibility boundary. Bump `OPPORTUNITY_RULES_VERSION` when changing the opportunity rules. Tests use a local SQLite sample; production PostgreSQL timing still needs measurement after deployment.
+
+Upsell pipeline rows are fetched through a 50-row paged `/leads` query with server-side search, filters and sorting. `/opportunities`, Upsell analytics, and the dashboard calculate grouped counts in SQL. PSM and Incident Investigation each have separate Stage 2 and Stage 3 sections, distinguished by `Lead.stage` while preserving the same lead through promotion. PostgreSQL opportunity refreshes use an advisory transaction lock so concurrent requests do not rebuild the same revision. Composite indexes for active stage lists, owner lists, recency, campaigns, and learner history are created on startup. Upsell learner lists are paged at 50; Learners CRM search is paged at 25 and returns a five-enrolment preview per learner, with full history on the detail page.
+
+IGC and IDIP board results use `learner_number` to join IGC to IDIP and IDIP units to each other. Recommendation rules evaluate each board learner number separately, even when two numbers share an email. Once a board number exists, a later board row with changed contact details keeps that same customer; conflicting contact identities are merged into it. All other course enrolments link to the customer through normalized email or phone, without using a learner number. Upsell leads retain a board number only for IDIP entry/unit opportunities backed by board history.
+
+All upload forms now start a background job and poll `/uploads/jobs/{job_id}` for processed, imported, and skipped counts. Main CRM source files, Learners CRM enrolments, Upsell course results, and Upsell marketing campaigns report progress after each 500-row slice. The old CRM migration keeps its separate source-mapping preview and progress endpoint. The upload pages remember an active job in browser session storage, so the admin can leave the page and return while it runs. Job progress is held by the running API process; finished file history remains in `upload_batches`.
+
+Each individual detail page in Main CRM, Learners CRM, and Upsell CRM now includes a live full customer journey. It is assembled from the shared `customer_id` on every request and includes main enquiry activity, individual enrolments and completions, board result records, marketing campaigns, and upsell opportunities and activities. Uploading a new linked result or enrolment changes the journey visible in all three workspaces without copying lifecycle rows between tables. Counselor-scoped enquiry and upsell activity respects the existing assignment rules. The endpoint data is generated only for the selected customer, not for whole lists.
+
+The shared journey uses the vertical Learning journey design on all three detail pages. Each dated card can show its source, status, result fields, and the original uploaded Main CRM row. The former Upsell-only result timeline was removed to avoid presenting two competing journeys. On a migrated Main CRM lead, the detail page's Last updated field displays the original `Updated at` text from the migration activity row. When several old CRM rows match one lead, the latest valid source date is displayed; a missing source date is shown as not provided. This affects the detail display only and leaves the operational `main_crm_leads.updated_at` timestamp available for sorting and current edits.
 
 ---
 

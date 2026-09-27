@@ -1,48 +1,124 @@
-from collections import defaultdict
-from datetime import datetime, timezone
+from collections import defaultdict, namedtuple
+from datetime import date, datetime, timedelta, timezone
+from uuid import uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from app.models import Course, Lead, LeadActivity, Learner, LearnerCourseRecord, User
-from app.services.course_rules import build_learner_opportunities
+from app.models import AppSetting, Course, Lead, LeadActivity, Learner, LearnerCourseRecord, LearnersCrmEnrollment, LearnersCrmProfile, User
+from app.services.course_rules import STAGE_ONE, build_customer_opportunities, get_cooling_days
+from app.services.learner_course_mapping import mapping_for_course_names, normalize_course_name
 
 VALID_LEAD_STATUSES = ("NEW", "IN_CONTACT", "REJECTED", "CONVERTED")
 VALID_ACTIVITY_TYPES = ("EMAIL_CAMPAIGN", "WHATSAPP_CAMPAIGN", "CALL", "NOTE")
+COURSE_REVISION_KEY = "course_records_revision"
+OPPORTUNITY_SYNC_KEY = "opportunity_sync_revision"
+OPPORTUNITY_NEXT_REFRESH_KEY = "opportunity_next_refresh_date"
+OPPORTUNITY_RULES_VERSION = "v4"
+BoardResult = namedtuple("BoardResult", "learner_number result event_date")
+BoardCourse = namedtuple("BoardCourse", "code")
+
+
+def mark_opportunities_dirty(db: Session):
+    setting = db.get(AppSetting, COURSE_REVISION_KEY)
+    if setting:
+        setting.value = uuid4().hex
+    else:
+        db.add(AppSetting(key=COURSE_REVISION_KEY, value=uuid4().hex))
 
 
 def sync_opportunity_leads(db: Session):
-    history_rows = db.execute(
-        select(LearnerCourseRecord, Course)
-        .join(Course, LearnerCourseRecord.course_id == Course.id)
-        .order_by(
-            LearnerCourseRecord.learner_number,
-            LearnerCourseRecord.event_date,
-            LearnerCourseRecord.id,
-        )
-    ).all()
+    today = date.today()
+    source_revision = db.get(AppSetting, COURSE_REVISION_KEY)
+    revision = f"{source_revision.value if source_revision else 'initial'}:{OPPORTUNITY_RULES_VERSION}"
+    synced_revision = db.get(AppSetting, OPPORTUNITY_SYNC_KEY)
+    next_refresh = db.get(AppSetting, OPPORTUNITY_NEXT_REFRESH_KEY)
+    due = bool(next_refresh and next_refresh.value and next_refresh.value <= today.isoformat())
+    if synced_revision and synced_revision.value == revision and not due:
+        return
+    if db.bind.dialect.name == "postgresql":
+        # Only one request may rebuild opportunities for a new upload/day.
+        db.execute(text("SELECT pg_advisory_xact_lock(294810753)"))
+        db.expire_all()
+        source_revision = db.get(AppSetting, COURSE_REVISION_KEY)
+        revision = f"{source_revision.value if source_revision else 'initial'}:{OPPORTUNITY_RULES_VERSION}"
+        synced_revision = db.get(AppSetting, OPPORTUNITY_SYNC_KEY)
+        next_refresh = db.get(AppSetting, OPPORTUNITY_NEXT_REFRESH_KEY)
+        due = bool(next_refresh and next_refresh.value and next_refresh.value <= today.isoformat())
+        if synced_revision and synced_revision.value == revision and not due:
+            db.commit()
+            return
+    enrolments_by_customer = defaultdict(list)
+    course_names = set()
+    for enrolment, customer_id in db.execute(select(LearnersCrmEnrollment, LearnersCrmProfile.customer_id).join(
+        LearnersCrmProfile, LearnersCrmEnrollment.learner_id == LearnersCrmProfile.id
+    ).where(LearnersCrmProfile.customer_id.is_not(None))):
+        enrolments_by_customer[customer_id].append(enrolment)
+        course_names.add(enrolment.course_name)
+    mappings = mapping_for_course_names(db, course_names)
 
-    history_by_learner = defaultdict(list)
-    for record, course in history_rows:
-        history_by_learner[record.learner_number].append((record, course))
+    history_by_customer = defaultdict(lambda: defaultdict(list))
+    for customer_id, number, result, event_date, code in db.execute(select(
+        Learner.customer_id, LearnerCourseRecord.learner_number,
+        LearnerCourseRecord.result, LearnerCourseRecord.event_date, Course.code,
+    ).join(Learner, LearnerCourseRecord.learner_number == Learner.learner_number)
+     .join(Course, LearnerCourseRecord.course_id == Course.id)
+     .where(Learner.customer_id.is_not(None), Course.code.in_(("IGC", "ID1", "ID2", "ID3")))):
+        history_by_customer[customer_id][number].append((BoardResult(number, result, event_date), BoardCourse(code)))
 
-    existing_leads = db.execute(select(Lead)).scalars().all()
-    by_key = {(lead.learner_number, lead.opportunity_key): lead for lead in existing_leads}
+    existing_leads = db.execute(select(Lead).order_by(Lead.id)).scalars().all()
+    legacy_numbers = {lead.learner_number for lead in existing_leads if not lead.customer_id and lead.learner_number}
+    legacy_customers = dict(db.execute(select(Learner.learner_number, Learner.customer_id).where(
+        Learner.learner_number.in_(legacy_numbers)))) if legacy_numbers else {}
+    by_key = {}
+    for lead in existing_leads:
+        if not lead.customer_id and lead.learner_number:
+            lead.customer_id = legacy_customers.get(lead.learner_number)
+        if lead.customer_id:
+            by_key.setdefault((lead.customer_id, lead.opportunity_key), lead)
     current_keys = set()
-
-    learner_numbers = db.execute(select(Learner.learner_number)).scalars().all()
-    for learner_number in learner_numbers:
-        opportunities = build_learner_opportunities(history_by_learner.get(learner_number, []))
-        for opportunity in opportunities:
-            key = (learner_number, opportunity["key"])
+    cooling_days = get_cooling_days(db)
+    next_eligibility = None
+    for customer_id in enrolments_by_customer.keys() | history_by_customer.keys():
+        enrolments = enrolments_by_customer.get(customer_id, [])
+        for enrolment in enrolments:
+            subcategory = normalize_course_name((mappings.get(normalize_course_name(enrolment.course_name)) or {}).get("sub_category") or "")
+            if subcategory in STAGE_ONE:
+                eligible = (enrolment.enrolment_date or enrolment.created_at.date()) + timedelta(days=cooling_days)
+                if eligible > today and (next_eligibility is None or eligible < next_eligibility):
+                    next_eligibility = eligible
+        enrolled_subcategories = {
+            normalize_course_name((mappings.get(normalize_course_name(item.course_name)) or {}).get("sub_category") or "")
+            for item in enrolments
+        }
+        # General course history uses contact matching. Board result sequences
+        # are calculated separately for each learner number, so an IGC pass on
+        # one board number cannot unlock IDIP units on another.
+        chosen = {item["key"]: (item, None) for item in build_customer_opportunities(
+            enrolments, [], mappings, cooling_days,
+        )}
+        for number, board_rows in history_by_customer.get(customer_id, {}).items():
+            for item in build_customer_opportunities([], board_rows, {}, cooling_days):
+                key = item["key"]
+                if normalize_course_name(item["target_subcategory"]) in enrolled_subcategories:
+                    continue
+                previous = chosen.get(key)
+                if previous is None or item["stage"] > previous[0]["stage"] or (key in {"IDP_ENTRY", "ID1", "ID2", "ID3"} and previous[1] is None):
+                    chosen[key] = (item, number)
+        for opportunity, source_number in chosen.values():
+            key = (customer_id, opportunity["key"])
+            board_number = source_number if opportunity["key"] in {"IDP_ENTRY", "ID1", "ID2", "ID3"} else None
             current_keys.add(key)
             lead = by_key.get(key)
             if lead is None:
                 lead = Lead(
-                    learner_number=learner_number,
+                    customer_id=customer_id,
+                    learner_number=board_number,
                     opportunity_key=opportunity["key"],
                     target_code=opportunity["target_code"],
+                    stage=opportunity["stage"],
+                    reason=opportunity["reason"],
                     trigger_date=opportunity.get("trigger_date"),
                     status="NEW",
                     is_active=True,
@@ -50,14 +126,26 @@ def sync_opportunity_leads(db: Session):
                 db.add(lead)
                 by_key[key] = lead
             else:
+                lead.customer_id = customer_id
+                lead.learner_number = board_number
                 lead.target_code = opportunity["target_code"]
+                lead.stage = opportunity["stage"]
+                lead.reason = opportunity["reason"]
                 lead.trigger_date = opportunity.get("trigger_date")
                 lead.is_active = True
 
-    for key, lead in by_key.items():
-        if key not in current_keys:
+    for lead in existing_leads:
+        if (lead.customer_id, lead.opportunity_key) not in current_keys or by_key.get((lead.customer_id, lead.opportunity_key)) is not lead:
             lead.is_active = False
 
+    if synced_revision:
+        synced_revision.value = revision
+    else:
+        db.add(AppSetting(key=OPPORTUNITY_SYNC_KEY, value=revision))
+    if next_refresh:
+        next_refresh.value = next_eligibility.isoformat() if next_eligibility else ""
+    else:
+        db.add(AppSetting(key=OPPORTUNITY_NEXT_REFRESH_KEY, value=next_eligibility.isoformat() if next_eligibility else ""))
     db.commit()
 
 

@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import date
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Lead, LeadActivity, Learner, MarketingCampaign, User
+from app.models import Customer, Lead, LeadActivity, Learner, MarketingCampaign, User
 from app.services.auth import get_current_user, require_admin
 from app.services.lead_workflow import (
     add_lead_activity,
@@ -13,6 +15,7 @@ from app.services.lead_workflow import (
     get_accessible_lead,
     sync_opportunity_leads,
 )
+from app.services.opportunities import SECTION_CONFIG, section_filter, section_key
 
 router = APIRouter(prefix="/leads", tags=["Leads"])
 
@@ -56,50 +59,97 @@ def get_counselors(
 
 @router.get("")
 def get_tracked_leads(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    active_only: bool = False,
+    section: str | None = None,
+    status: str | None = None,
+    counselor: str | None = None,
+    search: str | None = Query(None, max_length=320),
+    sort: str = "waiting",
+    direction: str = "desc",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     sync_opportunity_leads(db)
-    query = (
-        select(Lead, Learner, User)
-        .join(Learner, Lead.learner_number == Learner.learner_number)
-        .outerjoin(User, Lead.assigned_to_user_id == User.id)
-    )
+    conditions = []
     if current_user.role != "ADMIN":
-        query = query.where(Lead.assigned_to_user_id == current_user.id)
-
-    rows = db.execute(
-        query.order_by(Lead.is_active.desc(), Lead.updated_at.desc(), Lead.id.desc())
-    ).all()
-    campaign_rows = db.execute(
-        select(MarketingCampaign).order_by(MarketingCampaign.created_at.desc(), MarketingCampaign.id.desc())
-    ).scalars().all()
+        conditions.append(Lead.assigned_to_user_id == current_user.id)
+    if active_only:
+        conditions.append(Lead.is_active.is_(True))
+    if section:
+        section_conditions = section_filter(section)
+        if section_conditions is None:
+            raise HTTPException(status_code=400, detail="Unknown opportunity section.")
+        conditions.extend(section_conditions)
+    if status and status != "ALL":
+        conditions.append(Lead.status == status)
+    if counselor and counselor != "ALL":
+        if counselor == "UNASSIGNED":
+            conditions.append(Lead.assigned_to_user_id.is_(None))
+        elif counselor.isdecimal():
+            conditions.append(Lead.assigned_to_user_id == int(counselor))
+        else:
+            raise HTTPException(status_code=400, detail="Invalid counselor filter.")
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        conditions.append(or_(Customer.primary_name.ilike(term), Customer.primary_email.ilike(term),
+                              Customer.primary_phone.ilike(term), Lead.learner_number.ilike(term)))
+    total = db.scalar(select(func.count(Lead.id)).outerjoin(Customer, Lead.customer_id == Customer.id).where(*conditions)) or 0
+    sort_columns = {"learner": Customer.primary_name, "trigger": Lead.trigger_date,
+                    "waiting": Lead.trigger_date, "status": Lead.status,
+                    "counselor": User.display_name, "contact": Customer.primary_email,
+                    "updated": Lead.updated_at}
+    column = sort_columns.get(sort, Lead.trigger_date)
+    descending = direction == "desc"
+    if sort == "waiting":
+        descending = not descending
+    ordering = column.desc() if descending else column.asc()
+    rows = db.execute(select(Lead, Customer, Learner, User)
+        .outerjoin(Customer, Lead.customer_id == Customer.id)
+        .outerjoin(Learner, Lead.learner_number == Learner.learner_number)
+        .outerjoin(User, Lead.assigned_to_user_id == User.id)
+        .where(*conditions).order_by(ordering, Lead.id.desc())
+        .offset((page - 1) * page_size).limit(page_size)).all()
+    learner_numbers = {lead.learner_number for lead, _, _, _ in rows if lead.learner_number}
     latest_campaign = {}
-    for campaign in campaign_rows:
-        latest_campaign.setdefault(campaign.learner_number, campaign)
-    return [
+    if learner_numbers:
+        ranked = select(MarketingCampaign.id.label("id"), func.row_number().over(
+            partition_by=MarketingCampaign.learner_number,
+            order_by=(MarketingCampaign.created_at.desc(), MarketingCampaign.id.desc())
+        ).label("rank")).where(MarketingCampaign.learner_number.in_(learner_numbers)).subquery()
+        for campaign in db.scalars(select(MarketingCampaign).join(ranked, MarketingCampaign.id == ranked.c.id).where(ranked.c.rank == 1)):
+            latest_campaign[campaign.learner_number] = campaign
+    items = [
         {
             "lead_id": lead.id,
-            "learner_number": learner.learner_number,
-            "name": learner.name,
-            "email_id": learner.email_id,
-            "contact_number": learner.contact_number,
+            "customer_id": lead.customer_id,
+            "learner_number": lead.learner_number,
+            "name": customer.primary_name if customer else learner.name if learner else "Unknown",
+            "email_id": customer.primary_email if customer else learner.email_id if learner else None,
+            "contact_number": customer.primary_phone if customer else learner.contact_number if learner else None,
             "target_code": lead.target_code,
-            "opportunity_key": lead.opportunity_key,
+            "target_name": SECTION_CONFIG.get(section_key(lead.opportunity_key, lead.stage), (lead.target_code,))[0],
+            "stage": lead.stage,
+            "trigger_courses": [f"Stage {lead.stage}"] if lead.stage else [],
             "trigger_date": lead.trigger_date,
+            "days_since_trigger": max((date.today() - lead.trigger_date).days, 0) if lead.trigger_date else None,
+            "opportunity_key": lead.opportunity_key,
             "status": lead.status,
             "is_active": lead.is_active,
             "assigned_to_user_id": lead.assigned_to_user_id,
             "assigned_to_name": counselor.display_name if counselor else None,
             "updated_at": lead.updated_at,
             "latest_campaign": ({
-                "marketing_type": latest_campaign[learner.learner_number].marketing_type,
-                "campaign_name": latest_campaign[learner.learner_number].campaign_name,
-                "created_at": latest_campaign[learner.learner_number].created_at,
-            } if learner.learner_number in latest_campaign else None),
+                "marketing_type": latest_campaign[lead.learner_number].marketing_type,
+                "campaign_name": latest_campaign[lead.learner_number].campaign_name,
+                "created_at": latest_campaign[lead.learner_number].created_at,
+            } if lead.learner_number in latest_campaign else None),
         }
-        for lead, learner, counselor in rows
+        for lead, customer, learner, counselor in rows
     ]
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size)}
 
 
 @router.get("/{lead_id}")
@@ -110,7 +160,8 @@ def get_lead(
 ):
     sync_opportunity_leads(db)
     lead = get_accessible_lead(db, lead_id, current_user)
-    learner = db.get(Learner, lead.learner_number)
+    learner = db.get(Learner, lead.learner_number) if lead.learner_number else None
+    customer = db.get(Customer, lead.customer_id) if lead.customer_id else None
     counselor = db.get(User, lead.assigned_to_user_id) if lead.assigned_to_user_id else None
 
     activity_rows = db.execute(
@@ -123,14 +174,17 @@ def get_lead(
         select(MarketingCampaign)
         .where(MarketingCampaign.learner_number == lead.learner_number)
         .order_by(MarketingCampaign.created_at.desc(), MarketingCampaign.id.desc())
-    ).scalars().all()
+    ).scalars().all() if lead.learner_number else []
 
     return {
         "lead": {
             "id": lead.id,
             "learner_number": lead.learner_number,
+            "customer_id": lead.customer_id,
             "opportunity_key": lead.opportunity_key,
             "target_code": lead.target_code,
+            "stage": lead.stage,
+            "reason": lead.reason,
             "trigger_date": lead.trigger_date,
             "status": lead.status,
             "is_active": lead.is_active,
@@ -142,13 +196,14 @@ def get_lead(
             "updated_at": lead.updated_at,
         },
         "learner": {
-            "learner_number": learner.learner_number,
-            "name": learner.name,
-            "email_id": learner.email_id,
-            "contact_number": learner.contact_number,
-            "nationality": learner.nationality,
-            "last_activity_date": learner.last_activity_date,
-        } if learner else None,
+            "customer_id": lead.customer_id,
+            "learner_number": lead.learner_number,
+            "name": customer.primary_name if customer else learner.name if learner else "Unknown",
+            "email_id": customer.primary_email if customer else learner.email_id if learner else None,
+            "contact_number": customer.primary_phone if customer else learner.contact_number if learner else None,
+            "nationality": learner.nationality if learner else None,
+            "last_activity_date": learner.last_activity_date if learner else None,
+        },
         "activities": [
             {
                 "id": activity.id,

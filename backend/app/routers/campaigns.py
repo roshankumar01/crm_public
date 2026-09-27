@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Lead, LeadActivity, Learner, MarketingCampaign, UploadBatch, User
 from app.services.auth import get_current_user, require_admin
-from app.services.importers.common import clean, clean_learner_number, read_upload, require_columns
+from app.services.importers.common import clean, clean_learner_number, read_upload, require_columns, upload_chunks
 
 router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
 
@@ -73,6 +73,7 @@ def upload_marketing_campaigns(
     file: Annotated[UploadFile, File()],
     admin_user: User = Depends(require_admin),
     db: Session = Depends(get_db),
+    progress=None,
 ):
     batch = UploadBatch(
         import_type="MARKETING_CAMPAIGN",
@@ -87,43 +88,47 @@ def upload_marketing_campaigns(
         df = read_upload(file)
         batch.rows_total = len(df)
         require_columns(df, {"learnernumber", "marketingtype", "campaignname"}, "Marketing campaign")
+        if progress:
+            progress(rows_total=len(df))
 
         imported = 0
         skipped = 0
         learners_created = 0
         duplicates = 0
-        for _, row in df.iterrows():
-            learner_number = clean_learner_number(row.get("learnernumber"))
-            campaign_name = clean(row.get("campaignname"))
-            marketing_type = clean(row.get("marketingtype"))
-            if not learner_number or not marketing_type or not campaign_name:
-                skipped += 1
-                continue
-            if not db.get(Learner, learner_number):
-                db.add(Learner(learner_number=learner_number, name="Unknown"))
-                db.flush()
-                learners_created += 1
-
-            existing = db.scalar(
-                select(MarketingCampaign.id).where(
-                    MarketingCampaign.learner_number == learner_number,
-                    MarketingCampaign.marketing_type == marketing_type,
-                    MarketingCampaign.campaign_name == campaign_name,
-                )
-            )
-            if existing:
-                skipped += 1
-                duplicates += 1
-                continue
-
-            db.add(MarketingCampaign(
-                learner_number=learner_number,
-                campaign_name=campaign_name,
-                marketing_type=marketing_type,
-                upload_batch_id=batch.id,
-                uploaded_by_user_id=admin_user.id,
-            ))
-            imported += 1
+        existing_keys = set(db.execute(select(
+            MarketingCampaign.learner_number, MarketingCampaign.marketing_type, MarketingCampaign.campaign_name
+        )).all())
+        known_learners = set(db.scalars(select(Learner.learner_number)).all())
+        for processed, rows in upload_chunks(df):
+            for row in rows:
+                learner_number = clean_learner_number(row.get("learnernumber"))
+                campaign_name = clean(row.get("campaignname"))
+                marketing_type = clean(row.get("marketingtype"))
+                if not learner_number or not marketing_type or not campaign_name:
+                    skipped += 1
+                    continue
+                if learner_number not in known_learners:
+                    db.add(Learner(learner_number=learner_number, name="Unknown"))
+                    known_learners.add(learner_number)
+                    learners_created += 1
+                key = (learner_number, marketing_type, campaign_name)
+                if key in existing_keys:
+                    skipped += 1
+                    duplicates += 1
+                    continue
+                existing_keys.add(key)
+                db.add(MarketingCampaign(
+                    learner_number=learner_number,
+                    campaign_name=campaign_name,
+                    marketing_type=marketing_type,
+                    upload_batch_id=batch.id,
+                    uploaded_by_user_id=admin_user.id,
+                ))
+                imported += 1
+            db.flush()
+            if progress:
+                progress(processed=processed, rows_imported=imported, rows_skipped=skipped,
+                         learners_created=learners_created, duplicates_skipped=duplicates)
 
         batch.rows_imported = imported
         batch.rows_skipped = skipped

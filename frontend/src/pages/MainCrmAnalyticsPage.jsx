@@ -1,10 +1,16 @@
 import { useEffect, useState } from "react";
-import { getMainCrmLeads } from "../api";
+import { getMainCrmSummary } from "../api";
+
+const SOURCES = [["INFO_EMAIL_LEADS", "Info email leads"], ["LIVE_ONLINE_LEADS", "Live online leads"], ["DIRECT_CALLS", "Direct calls"]];
 
 export default function MainCrmAnalyticsPage() {
-  const [leads, setLeads] = useState(null); const [error, setError] = useState("");
-  useEffect(() => { getMainCrmLeads().then(setLeads).catch(e => setError(e.message)); }, []);
-  if (!leads) return <div className="page"><div className="loading-state"><span/>{error || "Loading analytics..."}</div></div>;
-  const sources = [["INFO_EMAIL_LEADS","Info email leads"],["LIVE_ONLINE_LEADS","Live online leads"],["DIRECT_CALLS","Direct calls"]];
-  return <div className="page"><div className="page-header simple-header"><div><div className="eyebrow">MAIN CRM ANALYTICS</div><h1>Lead analytics</h1><p className="page-description">Source volumes, conversions, and registered-customer matching.</p></div></div><div className="simple-stats"><div className="simple-stat main"><span>Total leads</span><strong>{leads.length}</strong><small>All uploaded enquiries</small></div><div className="simple-stat"><span>Converted</span><strong>{leads.filter(l=>l.status_of_lead === "CONVERTED").length}</strong><small>Marked converted</small></div><div className="simple-stat"><span>Registered</span><strong>{leads.filter(l=>l.matched_learner_number).length}</strong><small>Linked learner lifecycle</small></div><div className="simple-stat"><span>Unassigned</span><strong>{leads.filter(l=>!l.assigned_to_user_id).length}</strong><small>Need a counselor</small></div></div><section className="feature-card performance-table"><div className="card-heading"><div><div className="eyebrow">SOURCE BREAKDOWN</div><h2>Performance by data source</h2></div></div><div className="table-card"><table><thead><tr><th>Source</th><th>Leads</th><th>Converted</th><th>Registered</th><th>Conversion rate</th></tr></thead><tbody>{sources.map(([value,label])=>{const rows=leads.filter(l=>l.source_category===value);const converted=rows.filter(l=>l.status_of_lead==="CONVERTED").length;return <tr key={value}><td><strong>{label}</strong></td><td>{rows.length}</td><td>{converted}</td><td>{rows.filter(l=>l.matched_learner_number).length}</td><td>{rows.length ? Math.round(converted/rows.length*100) : 0}%</td></tr>})}</tbody></table></div></section></div>;
+  const [summary, setSummary] = useState(null);
+  const [error, setError] = useState("");
+  useEffect(() => { getMainCrmSummary().then(setSummary).catch(requestError => setError(requestError.message)); }, []);
+  if (!summary) return <div className="page"><div className="loading-state"><span />{error || "Loading analytics..."}</div></div>;
+  return <div className="page">
+    <div className="page-header simple-header"><div><div className="eyebrow">MAIN CRM ANALYTICS</div><h1>Lead analytics</h1><p className="page-description">Source volumes, conversions, and registered-customer matching.</p></div></div>
+    <div className="simple-stats"><div className="simple-stat main"><span>Total leads</span><strong>{summary.total}</strong><small>All uploaded enquiries</small></div><div className="simple-stat"><span>Converted</span><strong>{summary.status_counts?.CONVERTED || 0}</strong><small>Marked converted</small></div><div className="simple-stat"><span>Registered</span><strong>{summary.registered}</strong><small>Linked learner lifecycle</small></div><div className="simple-stat"><span>Unassigned</span><strong>{summary.unassigned}</strong><small>Need a counselor</small></div></div>
+    <section className="feature-card performance-table"><div className="card-heading"><div><div className="eyebrow">SOURCE BREAKDOWN</div><h2>Performance by data source</h2></div></div><div className="table-card"><table><thead><tr><th>Source</th><th>Leads</th><th>Converted</th><th>Registered</th><th>Conversion rate</th></tr></thead><tbody>{SOURCES.map(([value, label]) => { const row = summary.source_breakdown?.[value] || { total: 0, converted: 0, registered: 0 }; return <tr key={value}><td><strong>{label}</strong></td><td>{row.total}</td><td>{row.converted}</td><td>{row.registered}</td><td>{row.total ? Math.round(row.converted / row.total * 100) : 0}%</td></tr>; })}</tbody></table></div></section>
+  </div>;
 }

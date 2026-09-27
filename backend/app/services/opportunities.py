@@ -1,159 +1,73 @@
-from collections import defaultdict
-from datetime import date
-
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import Course, Lead, Learner, LearnerCourseRecord, MarketingCampaign, User
-from app.services.course_rules import build_learner_opportunities
+from app.models import Lead, User
 from app.services.lead_workflow import sync_opportunity_leads
 
 SECTION_CONFIG = {
-    "IDP_ENTRY": {
-        "title": "IDP Entry",
-        "target_code": "IDP",
-        "description": "Learners who completed IGC and have not yet entered ID1, ID2 or ID3.",
-    },
-    "ID1": {
-        "title": "ID1 Opportunities",
-        "target_code": "ID1",
-        "description": "Learners who completed another IDP course but have not yet entered ID1.",
-    },
-    "ID2": {
-        "title": "ID2 Opportunities",
-        "target_code": "ID2",
-        "description": "Learners who completed another IDP course but have not yet entered ID2.",
-    },
-    "ID3": {
-        "title": "ID3 Opportunities",
-        "target_code": "ID3",
-        "description": "Learners who completed another IDP course but have not yet entered ID3.",
-    },
+    "IGC": ("IGC", "Stage 2 · IGC"),
+    "PSM_2": ("Nebosh PSM", "Stage 2 · Process Safety Management"),
+    "INCIDENT_2": ("Nebosh Incident Investigation", "Stage 2 · Incident Investigation"),
+    "PSM_3": ("Nebosh PSM", "Stage 3 · Process Safety Management"),
+    "INCIDENT_3": ("Nebosh Incident Investigation", "Stage 3 · Incident Investigation"),
+    "IDP_ENTRY": ("Nebosh Idip", "Stage 3 · IDIP entry"),
+    "ID1": ("IDIP -1", "Stage 3 · IDIP 1"),
+    "ID2": ("IDIP -2", "Stage 3 · IDIP 2"),
+    "ID3": ("IDIP -3", "Stage 3 · IDIP 3"),
 }
-SECTION_ORDER = ("IDP_ENTRY", "ID1", "ID2", "ID3")
+SECTION_ORDER = tuple(SECTION_CONFIG)
 
 
-def load_history_by_learner(db: Session):
-    rows = db.execute(
-        select(LearnerCourseRecord, Course)
-        .join(Course, LearnerCourseRecord.course_id == Course.id)
-        .order_by(
-            LearnerCourseRecord.learner_number,
-            LearnerCourseRecord.event_date,
-            LearnerCourseRecord.id,
-        )
-    ).all()
+def section_key(opportunity_key: str, stage: int | None) -> str:
+    if opportunity_key in {"PSM", "INCIDENT"}:
+        return f"{opportunity_key}_{stage or 2}"
+    return opportunity_key
 
-    grouped = defaultdict(list)
-    for record, course in rows:
-        grouped[record.learner_number].append((record, course))
-    return grouped
+
+def section_filter(key: str):
+    if key in {"PSM_2", "PSM_3", "INCIDENT_2", "INCIDENT_3"}:
+        name, stage = key.rsplit("_", 1)
+        return (Lead.opportunity_key == name, Lead.stage == int(stage))
+    if key in SECTION_CONFIG:
+        return (Lead.opportunity_key == key,)
+    return None
 
 
 def get_all_opportunities(db: Session, current_user: User | None = None):
+    """Small grouped summary; lead rows are fetched from the paged /leads API."""
     sync_opportunity_leads(db)
-
-    learners = db.execute(select(Learner).order_by(Learner.name)).scalars().all()
-    history_by_learner = load_history_by_learner(db)
-    leads_by_section = {key: [] for key in SECTION_ORDER}
-    today = date.today()
-
-    crm_leads = db.execute(select(Lead).where(Lead.is_active.is_(True))).scalars().all()
-    crm_by_key = {(lead.learner_number, lead.opportunity_key): lead for lead in crm_leads}
-
-    counselor_ids = {lead.assigned_to_user_id for lead in crm_leads if lead.assigned_to_user_id}
-    counselors = {}
-    if counselor_ids:
-        counselors = {
-            user.id: user
-            for user in db.execute(select(User).where(User.id.in_(counselor_ids))).scalars().all()
-        }
-
-    campaign_rows = db.execute(
-        select(MarketingCampaign)
-        .order_by(MarketingCampaign.created_at.desc(), MarketingCampaign.id.desc())
-    ).scalars().all()
-    latest_campaign = {}
-    for campaign in campaign_rows:
-        latest_campaign.setdefault(campaign.learner_number, campaign)
-
-    for learner in learners:
-        history_rows = history_by_learner.get(learner.learner_number, [])
-        for opportunity in build_learner_opportunities(history_rows):
-            crm = crm_by_key.get((learner.learner_number, opportunity["key"]))
-            if not crm:
-                continue
-            if current_user and current_user.role != "ADMIN" and crm.assigned_to_user_id != current_user.id:
-                continue
-
-            trigger_date = opportunity.get("trigger_date")
-            days_since = (today - trigger_date).days if trigger_date else None
-            counselor = counselors.get(crm.assigned_to_user_id)
-            campaign = latest_campaign.get(learner.learner_number)
-            leads_by_section[opportunity["key"]].append({
-                "lead_id": crm.id,
-                "learner_number": learner.learner_number,
-                "name": learner.name,
-                "email_id": learner.email_id,
-                "contact_number": learner.contact_number,
-                "nationality": learner.nationality,
-                "last_activity_date": learner.last_activity_date,
-                "target_code": opportunity["target_code"],
-                "target_name": opportunity["target_name"],
-                "opportunity_type": opportunity["opportunity_type"],
-                "trigger_courses": opportunity["trigger_courses"],
-                "trigger_date": trigger_date,
-                "days_since_trigger": days_since,
-                "reason": opportunity["reason"],
-                "status": crm.status,
-                "assigned_to_user_id": crm.assigned_to_user_id,
-                "assigned_to_name": counselor.display_name if counselor else None,
-                "assigned_at": crm.assigned_at,
-                "status_updated_at": crm.status_updated_at,
-                "latest_campaign": ({
-                    "marketing_type": campaign.marketing_type,
-                    "campaign_name": campaign.campaign_name,
-                    "created_at": campaign.created_at,
-                } if campaign else None),
-            })
-
-    for key in SECTION_ORDER:
-        leads_by_section[key].sort(
-            key=lambda item: (
-                item["trigger_date"] is None,
-                item["trigger_date"] or date.max,
-                item["name"],
-            )
-        )
-
-    sections = []
-    for key in SECTION_ORDER:
-        config = SECTION_CONFIG[key]
-        leads = leads_by_section[key]
-        sections.append({
-            "key": key,
-            "title": config["title"],
-            "target_code": config["target_code"],
-            "description": config["description"],
-            "count": len(leads),
-            "leads": leads,
-        })
-
-    unique_learners = {lead["learner_number"] for section in sections for lead in section["leads"]}
-    all_visible_leads = [lead for section in sections for lead in section["leads"]]
+    filters = [Lead.is_active.is_(True)]
+    if current_user and current_user.role != "ADMIN":
+        filters.append(Lead.assigned_to_user_id == current_user.id)
+    rows = db.execute(select(
+        Lead.opportunity_key, Lead.stage, Lead.status, Lead.assigned_to_user_id, func.count(Lead.id)
+    ).where(*filters).group_by(
+        Lead.opportunity_key, Lead.stage, Lead.status, Lead.assigned_to_user_id
+    )).all()
+    counts = {key: 0 for key in SECTION_ORDER}
+    statuses = {"NEW": 0, "IN_CONTACT": 0, "CONVERTED": 0, "REJECTED": 0}
+    total = unassigned = 0
+    for key, stage, status, owner, count in rows:
+        label = section_key(key, stage)
+        counts[label] = counts.get(label, 0) + count
+        statuses[status] = statuses.get(status, 0) + count
+        total += count
+        if owner is None:
+            unassigned += count
+    unique_learners = db.scalar(select(func.count(func.distinct(Lead.customer_id))).where(*filters)) or 0
     return {
         "summary": {
-            "unique_learners": len(unique_learners),
-            "total_opportunities": sum(section["count"] for section in sections),
-            "idp_entry": len(leads_by_section["IDP_ENTRY"]),
-            "id1": len(leads_by_section["ID1"]),
-            "id2": len(leads_by_section["ID2"]),
-            "id3": len(leads_by_section["ID3"]),
-            "new": sum(1 for lead in all_visible_leads if lead["status"] == "NEW"),
-            "in_contact": sum(1 for lead in all_visible_leads if lead["status"] == "IN_CONTACT"),
-            "converted": sum(1 for lead in all_visible_leads if lead["status"] == "CONVERTED"),
-            "rejected": sum(1 for lead in all_visible_leads if lead["status"] == "REJECTED"),
-            "unassigned": sum(1 for lead in all_visible_leads if lead["assigned_to_user_id"] is None),
+            "unique_learners": unique_learners,
+            "total_opportunities": total,
+            "idp_entry": counts["IDP_ENTRY"], "id1": counts["ID1"],
+            "id2": counts["ID2"], "id3": counts["ID3"],
+            "new": statuses["NEW"], "in_contact": statuses["IN_CONTACT"],
+            "converted": statuses["CONVERTED"], "rejected": statuses["REJECTED"],
+            "unassigned": unassigned,
+            "by_target": [{"key": key, "name": SECTION_CONFIG[key][1], "count": counts[key]} for key in SECTION_ORDER],
         },
-        "sections": sections,
+        "sections": [{"key": key, "title": SECTION_CONFIG[key][1],
+                      "target_code": SECTION_CONFIG[key][0],
+                      "description": f"Current recommendation for {SECTION_CONFIG[key][0]}.",
+                      "count": counts[key]} for key in SECTION_ORDER],
     }

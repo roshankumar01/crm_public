@@ -3,7 +3,7 @@ import re
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
-from app.models import Customer, CustomerIdentity, Learner, LearnersCrmProfile, MainCrmLead
+from app.models import Customer, CustomerIdentity, Lead, Learner, LearnersCrmProfile, MainCrmLead, UploadBatch
 
 
 def normalize_email(value):
@@ -18,16 +18,37 @@ def normalize_phone(value):
     return (digits[-10:] if len(digits) >= 10 else digits) or None
 
 
-def resolve_customer(db: Session, name=None, email=None, phone=None):
+def _merge_customer(db: Session, source_id: int, target_id: int):
+    """A repeated board learner number proves these two contact records are one person."""
+    if source_id == target_id:
+        return
+    for model in (CustomerIdentity, MainCrmLead, LearnersCrmProfile, Learner, Lead):
+        db.execute(update(model).where(model.customer_id == source_id).values(customer_id=target_id))
+    source = db.get(Customer, source_id)
+    if source:
+        db.delete(source)
+    from app.services.lead_workflow import mark_opportunities_dirty
+    mark_opportunities_dirty(db)
+
+
+def resolve_customer(db: Session, name=None, email=None, phone=None, preferred_customer_id=None):
     normalized_email = normalize_email(email)
     normalized_phone = normalize_phone(phone)
-    customer = None
+    customer = db.get(Customer, preferred_customer_id) if preferred_customer_id else None
     if normalized_email:
         identity = db.scalar(select(CustomerIdentity).where(CustomerIdentity.identity_type == "EMAIL", CustomerIdentity.normalized_value == normalized_email))
-        customer = db.get(Customer, identity.customer_id) if identity else None
+        if identity:
+            if customer and identity.customer_id != customer.id:
+                _merge_customer(db, identity.customer_id, customer.id)
+            else:
+                customer = db.get(Customer, identity.customer_id)
     if not customer and normalized_phone:
         identity = db.scalar(select(CustomerIdentity).where(CustomerIdentity.identity_type == "PHONE", CustomerIdentity.normalized_value == normalized_phone))
-        customer = db.get(Customer, identity.customer_id) if identity else None
+        if identity:
+            if customer and preferred_customer_id and identity.customer_id != customer.id:
+                _merge_customer(db, identity.customer_id, customer.id)
+            elif not customer:
+                customer = db.get(Customer, identity.customer_id)
     if not customer:
         customer = Customer(primary_name=name, primary_email=email, primary_phone=phone)
         db.add(customer); db.flush()
@@ -53,25 +74,26 @@ def customer_is_registered(db: Session, customer_id: int):
 
 
 def mark_customer_converted(db: Session, customer_id: int, learner_number=None):
-    values = {"status_of_lead": "CONVERTED"}
     if learner_number:
-        values["matched_learner_number"] = learner_number
-    db.execute(update(MainCrmLead).where(MainCrmLead.customer_id == customer_id).values(**values))
+        db.execute(update(MainCrmLead).where(MainCrmLead.customer_id == customer_id).values(
+            matched_learner_number=learner_number
+        ))
+    migration_batch = select(UploadBatch.id).where(
+        UploadBatch.id == MainCrmLead.upload_batch_id,
+        UploadBatch.import_type == "MAIN_CRM_MIGRATION",
+    ).exists()
+    db.execute(update(MainCrmLead).where(MainCrmLead.customer_id == customer_id, ~migration_batch).values(
+        status_of_lead="CONVERTED"
+    ))
 
 
 def backfill_customer_links(db: Session):
     for lead in db.execute(select(MainCrmLead).where(MainCrmLead.customer_id.is_(None))).scalars().all():
         lead.customer_id = resolve_customer(db, lead.full_name, lead.email, lead.phone_number).id
     for profile in db.execute(select(LearnersCrmProfile).where(LearnersCrmProfile.customer_id.is_(None))).scalars().all():
-        profile.customer_id = resolve_customer(db, profile.learner_name, profile.email_id, None).id
+        profile.customer_id = resolve_customer(db, profile.learner_name, profile.email_id, profile.phone_number).id
         mark_customer_converted(db, profile.customer_id)
     for learner in db.execute(select(Learner).where(Learner.customer_id.is_(None))).scalars().all():
         learner.customer_id = resolve_customer(db, learner.name, learner.email_id, learner.contact_number).id
         mark_customer_converted(db, learner.customer_id, learner.learner_number)
-    for lead in db.execute(select(MainCrmLead).where(MainCrmLead.customer_id.is_not(None))).scalars().all():
-        if customer_is_registered(db, lead.customer_id):
-            lead.status_of_lead = "CONVERTED"
-            learner = db.scalar(select(Learner).where(Learner.customer_id == lead.customer_id).limit(1))
-            if learner:
-                lead.matched_learner_number = learner.learner_number
     db.commit()
