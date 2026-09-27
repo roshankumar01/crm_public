@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getMainCrmMigrationProgress, previewMainCrmMigration, uploadMainCrmMigration } from "../api";
+import { downloadMigrationSkipped, getMainCrmMigrationProgress, previewMainCrmMigration, uploadMainCrmMigration } from "../api";
 
 const CATEGORIES = [
   ["INFO_EMAIL_LEADS", "Info email leads"],
@@ -83,6 +83,7 @@ export default function MainCrmMigrationUpload({ uploads, reload }) {
     <div className="section-heading"><div><div className="eyebrow">OLD CRM MIGRATION</div><h2>Migrate old CRM leads</h2><p className="small-muted">Upload one Excel file containing all three lead sources. Review where each Source value will go before importing.</p></div></div>
     {message && <div className="upload-message page-message">{message}</div>}
     {progress?.status === "PROCESSING" && <div className="migration-progress" role="status" aria-live="polite"><div><strong>Importing {progress.processed?.toLocaleString() || 0} of {progress.rows_total?.toLocaleString() || 0} rows</strong><span>{progress.rows_total ? Math.round((progress.processed || 0) / progress.rows_total * 100) : 0}%</span></div><progress value={progress.processed || 0} max={progress.rows_total || 1} /><p className="small-muted">{progress.rows_imported?.toLocaleString() || 0} imported · {progress.rows_skipped?.toLocaleString() || 0} skipped</p></div>}
+    {progress?.status === "COMPLETED" && progress.rows_skipped > 0 && <div className="migration-progress"><strong>{progress.rows_skipped.toLocaleString()} rows skipped</strong><button className="secondary-button" onClick={() => downloadMigrationSkipped(progress.unique_number)}>Download skipped rows</button></div>}
     <div className="upload-layout">
       <form className="upload-card" onSubmit={submit}>
         <h3>Migration upload</h3>
@@ -95,7 +96,7 @@ export default function MainCrmMigrationUpload({ uploads, reload }) {
         {preview && <><p className="small-muted">{preview.rows_total} rows found. Check the source mapping:</p>{preview.sources.map(item => <div className="format-item" key={item.source}><label>{item.source || "(blank Source)"} · {item.count} rows</label><select value={mapping[item.source]} onChange={event => setMapping(current => ({ ...current, [item.source]: event.target.value }))}>{CATEGORIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div>)}</>}
         <button className="primary-button" disabled={uploading || !!jobNumber || !file}>{uploading ? "Starting import..." : jobNumber ? "Import in progress" : mode === "UPDATE" ? "Replace migration data" : "Import old CRM data"}</button>
       </form>
-      <div className="format-card"><div className="eyebrow">EXPECTED FORMAT</div><h3>Old CRM export columns</h3><p>{COLUMNS}</p><div className="format-item"><strong>How rows are matched</strong><p>Email is read from Email or Email IDs; phone is read from Mobile or Other Phone numbers. A row needs at least one of these. Matching leads receive a migration activity while their current CRM edits are preserved.</p></div><div className="format-item"><strong>Legacy details</strong><p>Recent note and Message appear in lead history. The original row, including assignment and audit dates, remains available there.</p></div></div>
+      <div className="format-card"><div className="eyebrow">EXPECTED FORMAT</div><h3>Old CRM export columns</h3><p>{COLUMNS}</p><div className="format-item"><strong>How rows are matched</strong><p>Email IDs is used as the primary email and Email is the fallback; phone is read from Mobile or Other Phone numbers. A row needs at least one of these. Matching leads receive a migration activity while their current CRM edits are preserved.</p></div><div className="format-item"><strong>Legacy details</strong><p>Recent note and Message appear in lead history. The original row, including assignment and audit dates, remains available there.</p></div></div>
     </div>
   </section>;
 }

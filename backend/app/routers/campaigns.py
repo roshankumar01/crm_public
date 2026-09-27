@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Lead, LeadActivity, Learner, MarketingCampaign, UploadBatch, User
 from app.services.auth import get_current_user, require_admin
-from app.services.importers.common import clean, clean_learner_number, read_upload, require_columns, upload_chunks
+from app.services.importers.common import clean, clean_learner_number, dataframe_row_to_dict, read_upload, require_columns, upload_chunks
 
 router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
 
@@ -93,6 +93,7 @@ def upload_marketing_campaigns(
 
         imported = 0
         skipped = 0
+        skipped_rows = []
         learners_created = 0
         duplicates = 0
         existing_keys = set(db.execute(select(
@@ -106,6 +107,7 @@ def upload_marketing_campaigns(
                 marketing_type = clean(row.get("marketingtype"))
                 if not learner_number or not marketing_type or not campaign_name:
                     skipped += 1
+                    skipped_rows.append({"row_number": processed - len(rows) + rows.index(row) + 2, "reason": "Missing learner number, marketing type, or campaign name", **dataframe_row_to_dict(row)})
                     continue
                 if learner_number not in known_learners:
                     db.add(Learner(learner_number=learner_number, name="Unknown"))
@@ -115,6 +117,7 @@ def upload_marketing_campaigns(
                 if key in existing_keys:
                     skipped += 1
                     duplicates += 1
+                    skipped_rows.append({"row_number": processed - len(rows) + rows.index(row) + 2, "reason": "Duplicate campaign row", **dataframe_row_to_dict(row)})
                     continue
                 existing_keys.add(key)
                 db.add(MarketingCampaign(
@@ -144,6 +147,7 @@ def upload_marketing_campaigns(
             "rows_skipped": batch.rows_skipped,
             "learners_created": learners_created,
             "duplicates_skipped": duplicates,
+            "skipped_rows": skipped_rows,
         }
     except ValueError as exc:
         db.rollback()

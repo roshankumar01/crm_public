@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
 from app.database import Base, SessionLocal, engine
 from app.models import LEARNERS_CRM_INDEXES, MAIN_CRM_INDEXES, UPSELL_INDEXES, MaintenanceRun
-from app.routers import analytics, auth, campaigns, dashboard, learner_course_mapping, learners, learners_crm, leads, main_crm, opportunities, recommendation_rules, uploads
+from app.routers import analytics, auth, campaigns, company_dashboard, dashboard, learner_course_mapping, learners, learners_crm, leads, main_crm, opportunities, recommendation_rules, uploads
 
 Base.metadata.create_all(bind=engine)
 for index in (*MAIN_CRM_INDEXES, *LEARNERS_CRM_INDEXES):
@@ -98,6 +98,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(dashboard.router)
+app.include_router(company_dashboard.router)
 app.include_router(learners.router)
 app.include_router(opportunities.router)
 app.include_router(leads.router)

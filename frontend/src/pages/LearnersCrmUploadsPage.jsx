@@ -53,7 +53,7 @@ export default function LearnersCrmUploadsPage({ refreshKey = 0 }) {
 
   return <section className="upload-workspace-section">
     {message && <div className="upload-message page-message">{message}</div>}
-    <UploadProgress progress={progress} />
+    <UploadProgress progress={progress} jobId={jobId} />
     {unmappedCourses.length > 0 && <div className="format-card page-message"><strong>{unmappedCourses.length} course name{unmappedCourses.length === 1 ? " is" : "s are"} unmapped.</strong><p>Assign them to categories in <Link to="/crm/settings/course-mapping">Settings → Course mapping</Link>. Existing enrolments will update automatically.</p><details><summary>Show unmapped course names</summary><ul>{unmappedCourses.map(name => <li key={name}>{name}</li>)}</ul></details></div>}
     <div className="upload-layout">
       <form className="upload-card" onSubmit={submit}>

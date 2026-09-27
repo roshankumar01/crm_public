@@ -1,7 +1,9 @@
-from io import BytesIO
+from io import BytesIO, StringIO
+import csv
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
@@ -13,7 +15,7 @@ from app.models import (
 )
 from app.services.auth import require_admin
 from app.services.importers import import_course_file, list_importers
-from app.services.lead_workflow import mark_opportunities_dirty
+from app.services.lead_workflow import mark_opportunities_dirty, sync_opportunity_leads
 from app.services.upload_jobs import create_job, get_job, update_job
 
 router = APIRouter(prefix="/uploads", tags=["Uploads"])
@@ -35,6 +37,7 @@ def run_upload_job(job_id, payload, filename, kind, import_type, source_category
                 batch = import_course_file(db, import_type, upload_file, progress)
                 result = {"id": batch.id, "rows_total": batch.rows_total,
                           "rows_imported": batch.rows_imported, "rows_skipped": batch.rows_skipped}
+                result["skipped_rows"] = getattr(batch, "skipped_rows", [])
             else:
                 result = campaigns.upload_marketing_campaigns(upload_file, admin, db, progress)
             update_job(job_id, status="COMPLETED", processed=result["rows_total"],
@@ -100,6 +103,26 @@ def start_upload_job(
 @router.get("/jobs/{job_id}")
 def upload_job_progress(job_id: str, admin_user: User = Depends(require_admin)):
     return get_job(job_id)
+
+
+@router.get("/jobs/{job_id}/skipped")
+def download_skipped_rows(job_id: str, admin_user: User = Depends(require_admin)):
+    job = get_job(job_id)
+    rows = (job.get("result") or {}).get("skipped_rows") or []
+    output = StringIO(newline="")
+    if rows:
+        keys = []
+        for row in rows:
+            for key in row:
+                if key not in keys:
+                    keys.append(key)
+        writer = csv.DictWriter(output, fieldnames=keys, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    else:
+        output.write("row_number,reason\n")
+    output.seek(0)
+    return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="skipped-rows-{job_id}.csv"'})
 
 
 class ResetUploadsRequest(BaseModel):
@@ -173,9 +196,11 @@ def reset_selected_uploads(
                 db.execute(delete(Learner).where(Learner.learner_number == learner_number))
 
         db.execute(delete(UploadBatch).where(UploadBatch.id.in_(ids)))
-        if affected_learner_numbers or affected_profile_ids:
-            mark_opportunities_dirty(db)
+        # Any upload can affect registration state or the source contact set;
+        # invalidate and immediately reconcile generated Upsell opportunities.
+        mark_opportunities_dirty(db)
         db.commit()
+        sync_opportunity_leads(db)
     except Exception:
         db.rollback()
         raise

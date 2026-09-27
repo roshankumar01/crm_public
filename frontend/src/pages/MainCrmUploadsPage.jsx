@@ -77,7 +77,7 @@ export default function MainCrmUploadsPage({ refreshKey = 0 }) {
 
   return <section className="upload-workspace-section">
     {message && <div className="upload-message page-message">{message}</div>}
-    <UploadProgress progress={progress} />
+    <UploadProgress progress={progress} jobId={jobId} />
     <div className="upload-layout">
       <form className="upload-card" onSubmit={submit}>
         <div className="upload-icon">↑</div><h2>Upload CRM data</h2>

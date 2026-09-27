@@ -9,6 +9,7 @@ export default function AppLayout() {
   const { user, logout } = useAuth(); const navigate = useNavigate(); const location = useLocation(); const isAdmin = user?.role === "ADMIN";
   const isUpsell = location.pathname.startsWith("/upsell");
   const isLearnersCrm = location.pathname.startsWith("/learners-crm");
+  const isDashboard = location.pathname.startsWith("/dashboard");
   async function handleLogout() { await logout(); navigate("/login", { replace: true }); }
   const initials = user?.display_name?.split(" ").map(part => part[0]).slice(0, 2).join("").toUpperCase() || "LC";
   return <div className="app-shell">
@@ -18,8 +19,12 @@ export default function AppLayout() {
         <NavLink to="/crm" className={({ isActive }) => isActive ? "workspace-tab active" : "workspace-tab"}>Main CRM</NavLink>
         <NavLink to="/learners-crm" className={({ isActive }) => isActive ? "workspace-tab active" : "workspace-tab"}>Learners CRM</NavLink>
         <NavLink to="/upsell" className={({ isActive }) => isActive ? "workspace-tab active" : "workspace-tab"}>Upsell CRM</NavLink>
+        {isAdmin && <NavLink to="/dashboard" className={({ isActive }) => isDashboard ? "workspace-tab active" : "workspace-tab"}>Dashboard</NavLink>}
       </div>
-      {isUpsell ? <>
+      {isDashboard ? <>
+        <div className="nav-label">Company dashboard</div>
+        <nav className="nav"><NavItem to="/dashboard" end icon="dashboard">Overview</NavItem><NavItem to="/dashboard/sales" icon="analytics">Sales</NavItem><NavItem to="/dashboard/dinesh" icon="learners">Dinesh</NavItem></nav>
+      </> : isUpsell ? <>
         <div className="nav-label">Upsell menu</div>
         <nav className="nav"><NavItem to="/upsell" end icon="dashboard">Overview</NavItem>{isAdmin && <NavItem to="/upsell/learners" icon="learners">Learners</NavItem>}<NavItem to="/upsell/opportunities" icon="leads">{isAdmin ? "Lead pipeline" : "My leads"}</NavItem><NavItem to="/upsell/lead-analytics" icon="analytics">Analytics</NavItem></nav>
       </> : isLearnersCrm ? <>
@@ -27,7 +32,7 @@ export default function AppLayout() {
         <nav className="nav"><NavItem to="/learners-crm" end icon="dashboard">Overview</NavItem><NavItem to="/learners-crm/learners" icon="learners">Find learner</NavItem></nav>
       </> : <>
         <div className="nav-label">Main CRM menu</div>
-        <nav className="nav"><NavItem to="/crm" end icon="dashboard">Overview</NavItem><NavItem to="/crm/leads" icon="leads">{isAdmin ? "Lead pipeline" : "My leads"}</NavItem><NavItem to="/crm/analytics" icon="analytics">Analytics</NavItem>{isAdmin && <NavItem to="/crm/uploads" icon="uploads">Data uploads</NavItem>}</nav>
+        <nav className="nav"><NavItem to="/crm" end icon="dashboard">Overview</NavItem><NavItem to="/crm/leads" icon="leads">{isAdmin ? "Lead pipeline" : "My leads"}</NavItem><NavItem to="/crm/analytics" icon="analytics">Analytics</NavItem><NavItem to="/crm/mismatch" icon="analytics">Mismatch</NavItem>{isAdmin && <NavItem to="/crm/uploads" icon="uploads">Data uploads</NavItem>}</nav>
       </>}
       <div className="sidebar-bottom">
         {isAdmin && !isUpsell && !isLearnersCrm && <nav className="nav sidebar-settings" aria-label="Administration"><NavItem to="/crm/settings" icon="settings">Settings</NavItem></nav>}

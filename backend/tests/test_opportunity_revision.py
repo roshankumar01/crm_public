@@ -83,7 +83,7 @@ class OpportunityRevisionTests(unittest.TestCase):
         self.assertEqual(len(page["items"]), 1)
         self.assertEqual(page["items"][0]["stage"], 3)
         analytics = build_lead_analytics(self.db, admin)
-        self.assertEqual(analytics["summary"]["total_leads"], 4)
+        self.assertEqual(analytics["summary"]["total_leads"], 3)
         self.assertIn("PSM_3", {item["section_key"] for item in analytics["target_breakdown"]})
         self.assertEqual(dashboard_summary(admin, self.db)["total_learners"], 1)
         self.assertEqual(get_contacts(None, admin, self.db, 1)["items"][0]["customer_id"], customer.id)

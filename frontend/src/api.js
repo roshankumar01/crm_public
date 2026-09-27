@@ -40,7 +40,6 @@ export const login = (username, password) => request("/auth/login", {
 export const getMe = () => request("/auth/me");
 export const logout = () => request("/auth/logout", { method: "POST" });
 
-export const getDashboardSummary = () => request("/dashboard/summary");
 export const getLearners = (search = "") => request(`/learners${search ? `?search=${encodeURIComponent(search)}` : ""}`);
 export const getLearner = learnerNumber => request(`/learners/${learnerNumber}`);
 export const getUpsellContacts = (search = "", page = 1) => request(`/learners/contacts?search=${encodeURIComponent(search)}&page=${page}`);
@@ -128,8 +127,27 @@ export function getMainCrmLeads({ page = 1, pageSize = 50, sourceCategory = "ALL
   const params = new URLSearchParams({ page: String(page), page_size: String(pageSize), source_category: sourceCategory, search });
   return request(`/crm/leads?${params}`);
 }
-export const getMainCrmSummary = () => request("/crm/leads/summary");
+export const getMainCrmSummary = (period = "all") => request(`/crm/leads/summary?period=${encodeURIComponent(period)}`);
+const companyDashboardQuery = (range = {}) => {
+  const params = new URLSearchParams();
+  if (range.startDate && range.endDate) {
+    params.set("start_date", range.startDate);
+    params.set("end_date", range.endDate);
+  } else params.set("period", "all");
+  return params.toString();
+};
+export const getCompanyDashboard = (section, range) => request(`/company-dashboard/${section}?${companyDashboardQuery(range)}`);
+export const getCompanySalesCourses = (counselorId, range) => request(`/company-dashboard/sales/courses?${companyDashboardQuery(range)}${counselorId == null ? "" : `&counselor_id=${encodeURIComponent(counselorId)}`}`);
+export const getCompanySalesSources = (counselorId, course, range) => request(`/company-dashboard/sales/sources?${companyDashboardQuery(range)}&course=${encodeURIComponent(course)}${counselorId == null ? "" : `&counselor_id=${encodeURIComponent(counselorId)}`}`);
+export const getMainCrmMismatch = (period = "all") => request(`/crm/leads/mismatch?period=${encodeURIComponent(period)}`);
+export async function downloadCrmExport(path, filename) { const response = await fetch(`${API_URL}${path}`, { headers: { Authorization: `Bearer ${getStoredToken()}` } }); if (!response.ok) throw new Error(await response.text()); const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = filename; link.click(); URL.revokeObjectURL(url); }
+export const downloadMainCrmExport = period => downloadCrmExport(`/crm/leads/export?period=${encodeURIComponent(period)}`, "main-crm-export.xlsx");
+export const downloadLearnersCrmExport = period => downloadCrmExport(`/learners-crm/export?period=${encodeURIComponent(period)}`, "learners-crm-export.xlsx");
+export const downloadUpsellCrmExport = period => downloadCrmExport(`/analytics/leads/export?period=${encodeURIComponent(period)}`, "upsell-crm-export.xlsx");
+export const downloadMainCrmMismatch = period => downloadCrmExport(`/crm/leads/mismatch/export?period=${encodeURIComponent(period)}`, "converted-mismatches.xlsx");
 export const getMainCrmLead = leadId => request(`/crm/leads/detail/${leadId}`);
+export const updateMainCrmLeadDetails = (leadId, payload) => request(`/crm/leads/${leadId}/details`, { method: "PATCH", body: JSON.stringify(payload) });
+export const addMainCrmLeadNote = (leadId, note) => request(`/crm/leads/${leadId}/notes`, { method: "POST", body: JSON.stringify({ note }) });
 export const getMainCrmCampaignActivities = () => request("/crm/leads/campaign-activities");
 export const updateMainCrmLeadStatus = (leadId, status) => request(`/crm/leads/${leadId}/status`, {
   method: "PATCH", body: JSON.stringify({ status }),
@@ -150,6 +168,11 @@ export function uploadMainCrmMigration(file, sourceCategories, uploadMode = "CRE
   return request("/crm/leads/migration-start", { method: "POST", body: formData });
 }
 export const getMainCrmMigrationProgress = uniqueNumber => request(`/crm/leads/migration-progress/${encodeURIComponent(uniqueNumber)}`);
+export async function downloadMigrationSkipped(uniqueNumber) {
+  const response = await fetch(`${API_URL}/crm/leads/migration-skipped/${encodeURIComponent(uniqueNumber)}`, { headers: { Authorization: `Bearer ${getStoredToken()}` } });
+  if (!response.ok) throw new Error(await response.text());
+  const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = `skipped-migration-${uniqueNumber}.csv`; link.click(); URL.revokeObjectURL(url);
+}
 export function uploadMainCrmLeads(sourceCategory, file, uploadMode = "CREATE", uniqueNumber = "") {
   const formData = new FormData();
   formData.append("source_category", sourceCategory); formData.append("file", file);
@@ -160,7 +183,14 @@ export function uploadMainCrmLeads(sourceCategory, file, uploadMode = "CREATE", 
 export const getCounselorMapping = () => request("/crm/leads/counselor-mapping");
 export const createCounselor = payload => request("/crm/leads/counselor-mapping", { method: "POST", body: JSON.stringify(payload) });
 export const updateCounselor = (userId, payload) => request(`/crm/leads/counselor-mapping/${userId}`, { method: "PATCH", body: JSON.stringify(payload) });
-export const getLearnersCrmOverview = () => request("/learners-crm/overview");
+export const getLearnersCrmOverview = (period = "all") => request(`/learners-crm/overview?period=${encodeURIComponent(period)}`);
+export const getDashboardSummary = (period = "all") => request(`/dashboard/summary?period=${encodeURIComponent(period)}`);
+export async function downloadUploadSkipped(jobId) {
+  const response = await fetch(`${API_URL}/uploads/jobs/${encodeURIComponent(jobId)}/skipped`, { headers: { Authorization: `Bearer ${getStoredToken()}` } });
+  if (!response.ok) throw new Error(await response.text());
+  const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement("a");
+  link.href = url; link.download = `skipped-rows-${jobId}.csv`; link.click(); URL.revokeObjectURL(url);
+}
 export const searchLearnersCrm = (search, page = 1) => request(`/learners-crm/learners?search=${encodeURIComponent(search)}&page=${page}`);
 export const getLearnersCrmProfile = learnerId => request(`/learners-crm/learners/${learnerId}`);
 export const getLearnersCrmUploads = () => request("/learners-crm/uploads");

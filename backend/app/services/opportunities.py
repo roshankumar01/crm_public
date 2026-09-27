@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Lead, User
 from app.services.lead_workflow import sync_opportunity_leads
+from app.services.date_filters import period_condition
 
 SECTION_CONFIG = {
     "IGC": ("IGC", "Stage 2 · IGC"),
@@ -33,10 +34,11 @@ def section_filter(key: str):
     return None
 
 
-def get_all_opportunities(db: Session, current_user: User | None = None):
+def get_all_opportunities(db: Session, current_user: User | None = None, period: str = "all"):
     """Small grouped summary; lead rows are fetched from the paged /leads API."""
     sync_opportunity_leads(db)
     filters = [Lead.is_active.is_(True)]
+    filters.extend(period_condition(Lead.created_at, period))
     if current_user and current_user.role != "ADMIN":
         filters.append(Lead.assigned_to_user_id == current_user.id)
     rows = db.execute(select(

@@ -7,6 +7,7 @@ const LABELS = {
 };
 
 const labelFor = value => value.replaceAll("_", " ").replace(/\b\w/g, letter => letter.toUpperCase());
+const displayValue = value => value !== null && typeof value === "object" ? JSON.stringify(value) : value;
 
 export default function CustomerLifecycle({ lifecycle }) {
   const [showAll, setShowAll] = useState(false);
@@ -25,8 +26,8 @@ export default function CustomerLifecycle({ lifecycle }) {
         <article className="journey-card lifecycle-journey-card">
           <div className="journey-card-header"><div><div className="journey-date">{event.date?.slice(0, 10) || "Date unavailable"}</div><span className="lifecycle-source">{LABELS[event.kind] || event.kind}</span><h3>{event.href ? <Link to={event.href}>{event.title}</Link> : event.title}{event.kind === "RESULT" && status ? ` - ${status.toUpperCase()}` : ""}</h3></div>{status && <span className={statusClass}>{status}</span>}</div>
           {event.detail && <p className="lifecycle-event-detail">{event.detail}</p>}
-          {fields.length > 0 && <div className="detail-grid">{fields.map(([key, value]) => <div key={key}><span>{labelFor(key)}</span><strong>{value}</strong></div>)}</div>}
-          {original.length > 0 && <details className="profile-original-data"><summary>View original uploaded row</summary><div className="detail-grid">{original.map(([key, value]) => <div key={key}><span>{labelFor(key)}</span><strong>{value}</strong></div>)}</div></details>}
+          {fields.length > 0 && <div className="detail-grid">{fields.map(([key, value]) => <div key={key}><span>{labelFor(key)}</span><strong>{displayValue(value)}</strong></div>)}</div>}
+          {original.length > 0 && <details className="profile-original-data"><summary>View original uploaded row</summary><div className="detail-grid">{original.map(([key, value]) => <div key={key}><span>{labelFor(key)}</span><strong>{displayValue(value)}</strong></div>)}</div></details>}
         </article>
       </div>;
     })}</div> : <div className="empty-card">No linked customer activity yet.</div>}

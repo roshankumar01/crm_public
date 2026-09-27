@@ -1,5 +1,8 @@
-export default function UploadProgress({ progress }) {
-  if (!progress || progress.status !== "PROCESSING") return null;
+import { downloadUploadSkipped } from "../api";
+
+export default function UploadProgress({ progress, jobId }) {
+  if (!progress) return null;
+  if (progress.status !== "PROCESSING") return progress.rows_skipped > 0 ? <div className="migration-progress"><strong>{progress.status === "FAILED" ? progress.error_message : `${progress.rows_skipped.toLocaleString()} rows skipped`}</strong>{progress.status === "COMPLETED" && <button className="secondary-button" onClick={() => downloadUploadSkipped(jobId || progress.job_id)}>Download skipped rows</button>}</div> : null;
   const total = progress.rows_total || 0;
   const processed = progress.processed || 0;
   return <div className="migration-progress" role="status" aria-live="polite">

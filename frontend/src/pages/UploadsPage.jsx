@@ -96,7 +96,7 @@ export default function UploadsPage({ refreshKey = 0 }) {
         <label>File</label><input type="file" accept=".xlsx,.csv" onChange={e => setFile(e.target.files[0] || null)} />
         <button type="submit" className="primary-button" disabled={uploading || !!courseJob.jobId || !file}>{uploading ? "Starting import..." : courseJob.jobId ? "Import in progress" : "Upload course file"}</button>
         {message && <div className="upload-message">{message}</div>}
-        <UploadProgress progress={courseJob.progress} />
+        <UploadProgress progress={courseJob.progress} jobId={courseJob.jobId} />
       </form>
       <div className="format-card"><div className="eyebrow">EXPECTED FORMAT</div><h3>{selectedImporter?.display_name || "Course importer"}</h3><p>{selectedImporter?.description}</p><div className="format-item"><strong>All accepted column names</strong>{selectedImporter?.columns.map((column, index) => <div key={column.name}><p>{index + 1}. {displayColumn(column)}</p>{column.note && <p className="small-muted">{column.note}</p>}</div>)}<p className="small-muted">* Mandatory column. IDP also requires either a course-style column or at least one ID result column.</p></div></div>
     </div>
@@ -108,7 +108,7 @@ export default function UploadsPage({ refreshKey = 0 }) {
         <label>Campaign file</label><input type="file" accept=".xlsx,.csv" onChange={e => setCampaignFile(e.target.files[0] || null)} />
         <button type="submit" className="primary-button" disabled={campaignUploading || !!campaignJob.jobId || !campaignFile}>{campaignUploading ? "Starting import..." : campaignJob.jobId ? "Import in progress" : "Upload campaign file"}</button>
         {campaignMessage && <div className="upload-message">{campaignMessage}</div>}
-        <UploadProgress progress={campaignJob.progress} />
+        <UploadProgress progress={campaignJob.progress} jobId={campaignJob.jobId} />
       </form>
       <div className="format-card"><div className="eyebrow">REQUIRED COLUMNS</div><h3>Marketing campaign format</h3><div className="format-item"><strong>Learner number *</strong><p>Must match an existing learner, or a basic learner profile will be created.</p></div><div className="format-item"><strong>Marketing type *</strong><p>For example: Email, WhatsApp, SMS or Event.</p></div><div className="format-item"><strong>Campaign name *</strong><p>The name used to identify the campaign.</p></div><p className="small-muted">* Mandatory column</p></div>
     </div>

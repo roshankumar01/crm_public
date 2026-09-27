@@ -1,9 +1,12 @@
 from datetime import datetime, timezone
 import secrets
+from io import BytesIO
+import pandas as pd
 from collections import Counter
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -12,9 +15,10 @@ from app.models import LearnersCrmEnrollment, LearnersCrmProfile, MainCrmLead, U
 from app.services.auth import get_current_user, require_admin
 from app.services.customer_identity import mark_customer_converted, normalize_phone, resolve_customer
 from app.services.customer_lifecycle import customer_lifecycle
-from app.services.importers.common import clean, clean_learner_number, parse_date, read_upload, require_columns, upload_chunks
+from app.services.importers.common import clean, clean_learner_number, dataframe_row_to_dict, parse_date, read_upload, require_columns, upload_chunks
 from app.services.learner_course_mapping import categories_for_course_names, mapping_for_course_names, normalize_course_name
 from app.services.lead_workflow import mark_opportunities_dirty
+from app.services.date_filters import period_condition
 
 router = APIRouter(prefix="/learners-crm", tags=["Learners CRM"])
 REQUIRED_COLUMNS = {"enrolmentid", "learnername", "emailid", "coursename", "enrolmentdate", "startdate", "completiondate", "completionstatus"}
@@ -33,18 +37,20 @@ def new_upload_number(db):
 
 
 @router.get("/overview")
-def overview(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    total_learners = db.scalar(select(func.count()).select_from(LearnersCrmProfile)) or 0
-    total_enrolments = db.scalar(select(func.count()).select_from(LearnersCrmEnrollment)) or 0
+def overview(current_user: User = Depends(get_current_user), db: Session = Depends(get_db), period: str = "all"):
+    enrolment_filters = period_condition(LearnersCrmEnrollment.created_at, period)
+    filtered_profile_ids = select(LearnersCrmEnrollment.learner_id).where(*enrolment_filters).distinct().subquery()
+    total_learners = db.scalar(select(func.count()).select_from(filtered_profile_ids)) or 0
+    total_enrolments = db.scalar(select(func.count()).select_from(LearnersCrmEnrollment).where(*enrolment_filters)) or 0
     normalized_status = func.upper(func.trim(LearnersCrmEnrollment.completion_status))
     status_counts = dict(db.execute(select(normalized_status, func.count()).select_from(
-        LearnersCrmEnrollment).group_by(normalized_status)).all())
+        LearnersCrmEnrollment).where(*enrolment_filters).group_by(normalized_status)).all())
     active = status_counts.get("NOT COMPLETED", 0)
     completed = status_counts.get("COMPLETED", 0)
-    matched_enquiries = db.scalar(select(func.count()).select_from(LearnersCrmProfile).where(
+    matched_enquiries = db.scalar(select(func.count()).select_from(LearnersCrmProfile).where(LearnersCrmProfile.id.in_(select(filtered_profile_ids.c.learner_id)),
         select(MainCrmLead.id).where(MainCrmLead.normalized_email == LearnersCrmProfile.normalized_email).exists()
     )) or 0
-    course_rows = db.execute(select(LearnersCrmEnrollment.course_name, func.count()).group_by(
+    course_rows = db.execute(select(LearnersCrmEnrollment.course_name, func.count()).where(*enrolment_filters).group_by(
         LearnersCrmEnrollment.course_name
     )).all()
     mapped_categories = categories_for_course_names(db, [name for name, _ in course_rows])
@@ -52,6 +58,21 @@ def overview(current_user: User = Depends(get_current_user), db: Session = Depen
     for name, count in course_rows:
         category_counts[mapped_categories.get(normalize_course_name(name), "Unmapped")] += count
     return {"total_learners": total_learners, "total_enrolments": total_enrolments, "completed": completed, "active": active, "matched_enquiries": matched_enquiries, "course_categories": [{"name": name, "enrolments": count} for name, count in sorted(category_counts.items(), key=lambda item: (-item[1], item[0]))]}
+
+
+@router.get("/export")
+def export_learners(period: str = "all", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    filters = period_condition(LearnersCrmEnrollment.created_at, period)
+    rows = db.execute(select(LearnersCrmProfile, LearnersCrmEnrollment).join(LearnersCrmEnrollment, LearnersCrmEnrollment.learner_id == LearnersCrmProfile.id).where(*filters).order_by(LearnersCrmEnrollment.created_at.desc())).all()
+    values = [{"Learner": profile.learner_name, "Email": profile.email_id, "Phone": profile.phone_number,
+               "Enrolment ID": enrollment.enrolment_id, "Course": enrollment.course_name,
+               "Enrolment Date": enrollment.enrolment_date, "Completion Date": enrollment.completion_date,
+               "Completion Status": enrollment.completion_status, "Created At": enrollment.created_at,
+               "Updated At": enrollment.updated_at} for profile, enrollment in rows]
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer: pd.DataFrame(values).to_excel(writer, sheet_name="Learners CRM", index=False)
+    output.seek(0)
+    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="learners-crm-export.xlsx"'})
 
 
 @router.get("/learners")
@@ -160,7 +181,7 @@ def upload(
         raise HTTPException(status_code=400, detail="Upload mode must be CREATE or UPDATE.")
     try:
         frame = read_upload(file); require_columns(frame, REQUIRED_COLUMNS, "Learners CRM")
-        batch.rows_total = len(frame); imported = skipped = mapped = 0
+        batch.rows_total = len(frame); imported = skipped = mapped = 0; skipped_rows = []
         if progress:
             progress(rows_total=len(frame))
         mapped_categories = categories_for_course_names(db, [clean(value) for value in frame["coursename"]])
@@ -179,7 +200,7 @@ def upload(
             for row in rows:
                 enrolment_id = clean(row.get("enrolmentid")); email = normalize_email(row.get("emailid"))
                 if not enrolment_id or not email:
-                    skipped += 1; continue
+                    skipped += 1; skipped_rows.append({"row_number": processed - len(rows) + rows.index(row) + 2, "reason": "Missing enrolment ID or email", **dataframe_row_to_dict(row)}); continue
                 phone = clean_learner_number(row.get("phonenumber")) if "phonenumber" in frame.columns else None
                 profile = profiles.get(email)
                 if not profile:
@@ -226,7 +247,7 @@ def upload(
         if imported or mode == "UPDATE":
             mark_opportunities_dirty(db)
         db.commit()
-        return {"unique_number": batch.unique_number, "rows_total": batch.rows_total, "rows_imported": imported, "rows_skipped": skipped, "rows_mapped": mapped, "unmapped_courses": sorted(unmapped_courses)}
+        return {"unique_number": batch.unique_number, "rows_total": batch.rows_total, "rows_imported": imported, "rows_skipped": skipped, "rows_mapped": mapped, "unmapped_courses": sorted(unmapped_courses), "skipped_rows": skipped_rows}
     except Exception as exc:
         db.rollback(); failed = db.get(UploadBatch, batch.id)
         if failed:

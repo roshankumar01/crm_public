@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select, union
 from sqlalchemy.orm import Session
 
@@ -7,6 +7,7 @@ from app.models import Learner, LearnersCrmProfile, User
 from app.services.auth import get_current_user
 from app.services.lead_analytics import build_lead_analytics
 from app.services.opportunities import get_all_opportunities
+from app.services.date_filters import period_condition
 
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 
@@ -15,8 +16,9 @@ router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 def dashboard_summary(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    period: str = "all",
 ):
-    lead_analytics = build_lead_analytics(db, current_user)
+    lead_analytics = build_lead_analytics(db, current_user, period)
     lead_summary = lead_analytics["summary"]
 
     if current_user.role != "ADMIN":
@@ -33,11 +35,11 @@ def dashboard_summary(
         }
 
     linked_customers = union(
-        select(Learner.customer_id).where(Learner.customer_id.is_not(None)),
-        select(LearnersCrmProfile.customer_id).where(LearnersCrmProfile.customer_id.is_not(None)),
+        select(Learner.customer_id).where(Learner.customer_id.is_not(None), *period_condition(Learner.updated_at, period)),
+        select(LearnersCrmProfile.customer_id).where(LearnersCrmProfile.customer_id.is_not(None), *period_condition(LearnersCrmProfile.updated_at, period)),
     ).subquery()
     total_learners = db.scalar(select(func.count()).select_from(linked_customers)) or 0
-    opportunity_summary = get_all_opportunities(db, current_user)["summary"]
+    opportunity_summary = get_all_opportunities(db, current_user, period)["summary"]
     return {
         "mode": "ADMIN",
         "total_learners": total_learners,

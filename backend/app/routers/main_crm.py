@@ -1,22 +1,25 @@
 import re
 import json
 import secrets
-from io import BytesIO
+from io import BytesIO, StringIO
+import csv
 from datetime import datetime, timezone
 from typing import Annotated
 
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal, get_db
-from app.models import AuthSession, Customer, CustomerIdentity, Learner, MainCrmActivity, MainCrmLead, UploadBatch, User
+from app.models import AuthSession, Customer, CustomerIdentity, Learner, LearnersCrmProfile, MainCrmActivity, MainCrmLead, UploadBatch, User
 from app.services.auth import get_current_user, hash_password, require_admin
 from app.services.customer_identity import customer_is_registered, mark_customer_converted, resolve_customer
 from app.services.customer_lifecycle import customer_lifecycle
 from app.services.importers.common import clean, dataframe_row_to_dict, parse_date, read_upload, require_columns, upload_rows, UPLOAD_CHUNK_SIZE
+from app.services.date_filters import period_condition
 
 router = APIRouter(prefix="/crm/leads", tags=["Main CRM"])
 
@@ -40,6 +43,22 @@ class StatusUpdate(BaseModel):
 
 class AssignmentUpdate(BaseModel):
     counselor_user_id: int | None = None
+
+
+class LeadEditPayload(BaseModel):
+    full_name: str | None = None
+    email: str | None = None
+    phone_number: str | None = None
+    whatsapp_number: str | None = None
+    course: str | None = None
+    region: str | None = None
+    country: str | None = None
+    age: int | None = None
+    sales_owner: str | None = None
+
+
+class LeadNotePayload(BaseModel):
+    note: str
 
 
 class CounselorCreate(BaseModel):
@@ -90,8 +109,11 @@ def migration_category(source):
 
 
 def migration_contact(row):
-    emails = re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", " ".join(filter(None, (row_value(row, "email"), row_value(row, "emailids")))))
-    email = emails[0] if emails else None
+    # The legacy `Email IDs` column is the primary address. `Email` is used
+    # only as a fallback when Email IDs is blank or invalid.
+    primary = re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", row_value(row, "emailids") or "")
+    fallback = re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", row_value(row, "email") or "")
+    email = (primary or fallback or [None])[0]
     phones = [re.sub(r"\.0$", "", value) if value else None for value in (row_value(row, "mobile"), row_value(row, "otherphonenumbers"))]
     phone = next((value for value in phones if value and len(re.sub(r"\D", "", value)) >= 7), None)
     return email, phone
@@ -257,30 +279,97 @@ def list_leads(
 
 
 @router.get("/summary")
-def lead_summary(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def lead_summary(current_user: User = Depends(get_current_user), db: Session = Depends(get_db), period: str = "all"):
     filters = [] if current_user.role == "ADMIN" else [MainCrmLead.assigned_to_user_id == current_user.id]
+    filters.extend(period_condition(MainCrmLead.created_at, period))
+    registered_ids = set(db.execute(select(Learner.customer_id).where(Learner.customer_id.is_not(None))).scalars())
+    registered_ids.update(db.execute(select(LearnersCrmProfile.customer_id).where(LearnersCrmProfile.customer_id.is_not(None))).scalars())
+    if registered_ids:
+        conversion_update = db.execute(MainCrmLead.__table__.update().where(MainCrmLead.customer_id.in_(registered_ids), MainCrmLead.status_of_lead != "CONVERTED").values(status_of_lead="CONVERTED"))
+        if conversion_update.rowcount:
+            db.commit()
+    registered_customer_ids = set()
+    if registered_ids:
+        registered_customer_ids = set(db.execute(select(MainCrmLead.customer_id).where(*filters, MainCrmLead.customer_id.in_(registered_ids))).scalars())
+    migration_activity = select(MainCrmActivity.id).where(
+        MainCrmActivity.lead_id == MainCrmLead.id,
+        MainCrmActivity.activity_type == "MIGRATION",
+    ).exists()
     rows = db.execute(select(
-        MainCrmLead.source_category, MainCrmLead.status_of_lead, func.count(),
-        func.sum(case((MainCrmLead.matched_learner_number.is_not(None), 1), else_=0)),
+        MainCrmLead.source, MainCrmLead.status_of_lead, migration_activity, func.count(),
+        func.sum(case((MainCrmLead.customer_id.in_(registered_ids), 1), else_=0)) if registered_ids else func.sum(case((MainCrmLead.id == -1, 1), else_=0)),
         func.sum(case((MainCrmLead.assigned_to_user_id.is_(None), 1), else_=0)),
-    ).where(*filters).group_by(MainCrmLead.source_category, MainCrmLead.status_of_lead)).all()
-    source_counts = {category: 0 for category in SOURCE_CATEGORIES}
-    source_breakdown = {category: {"total": 0, "converted": 0, "registered": 0} for category in SOURCE_CATEGORIES}
+    ).where(*filters).group_by(MainCrmLead.source, MainCrmLead.status_of_lead, migration_activity)).all()
+    source_counts = {}
+    source_category_counts = {category: 0 for category in SOURCE_CATEGORIES}
+    source_breakdown = {}
     status_counts = {}
-    total = registered = unassigned = 0
-    for category, status, count, matched, without_owner in rows:
+    status_breakdown = {}
+    total = unassigned = 0
+    for source, status, migrated, count, matched, without_owner in rows:
+        source_name = (source or "Unknown").strip() or "Unknown"
         total += count
-        registered += matched or 0
         unassigned += without_owner or 0
-        source_counts[category] = source_counts.get(category, 0) + count
+        source_counts[source_name] = source_counts.get(source_name, 0) + count
         status_counts[status] = status_counts.get(status, 0) + count
-        entry = source_breakdown.setdefault(category, {"total": 0, "converted": 0, "registered": 0})
+        entry = source_breakdown.setdefault(source_name, {"total": 0, "converted": 0, "registered": 0})
         entry["total"] += count
         entry["registered"] += matched or 0
         if status == "CONVERTED": entry["converted"] += count
-    return {"total": total, "registered": registered, "unassigned": unassigned,
-            "source_counts": source_counts, "status_counts": status_counts,
+        status_entry = status_breakdown.setdefault(status, {"total": 0, "normal": 0, "migrated": 0})
+        status_entry["total"] += count
+        status_entry["migrated" if migrated else "normal"] += count
+    category_rows = db.execute(select(MainCrmLead.source_category, func.count()).where(*filters).group_by(MainCrmLead.source_category)).all()
+    source_category_counts.update({category: count for category, count in category_rows})
+    return {"total": total, "registered": len(registered_customer_ids), "unassigned": unassigned,
+            "source_counts": source_counts, "source_category_counts": source_category_counts,
+            "status_counts": status_counts, "status_breakdown": status_breakdown,
             "source_breakdown": source_breakdown}
+
+
+def _mismatch_rows(db, current_user, period="all"):
+    registered_ids = set(db.execute(select(Learner.customer_id).where(Learner.customer_id.is_not(None))).scalars())
+    registered_ids.update(db.execute(select(LearnersCrmProfile.customer_id).where(LearnersCrmProfile.customer_id.is_not(None))).scalars())
+    filters = [MainCrmLead.status_of_lead == "CONVERTED", *period_condition(MainCrmLead.created_at, period)]
+    if current_user.role != "ADMIN":
+        filters.append(MainCrmLead.assigned_to_user_id == current_user.id)
+    leads = db.scalars(select(MainCrmLead).where(*filters).order_by(MainCrmLead.updated_at.desc(), MainCrmLead.id.desc())).all()
+    return [lead for lead in leads if lead.customer_id not in registered_ids]
+
+
+@router.get("/mismatch")
+def converted_mismatch(period: str = "all", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    leads = _mismatch_rows(db, current_user, period)
+    return {"total": len(leads), "items": [lead_dict(lead, db.get(User, lead.assigned_to_user_id), False) for lead in leads]}
+
+
+@router.get("/mismatch/export")
+def export_converted_mismatch(period: str = "all", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    leads = _mismatch_rows(db, current_user, period)
+    rows = [{"Lead ID": lead.id, "Name": lead.full_name, "Email": lead.email, "Phone": lead.phone_number,
+             "Course": lead.course, "Source": lead.source, "Status": lead.status_of_lead,
+             "Counselor": (db.get(User, lead.assigned_to_user_id).display_name if lead.assigned_to_user_id and db.get(User, lead.assigned_to_user_id) else "Unassigned"),
+             "Created At": lead.created_at, "Updated At": lead.updated_at} for lead in leads]
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        pd.DataFrame(rows).to_excel(writer, sheet_name="Mismatches", index=False)
+    output.seek(0)
+    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="converted-mismatches.xlsx"'})
+
+
+@router.get("/export")
+def export_main_crm(period: str = "all", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    filters = period_condition(MainCrmLead.created_at, period)
+    if current_user.role != "ADMIN": filters.append(MainCrmLead.assigned_to_user_id == current_user.id)
+    leads = db.scalars(select(MainCrmLead).where(*filters).order_by(MainCrmLead.created_at.desc())).all()
+    rows = [{"Lead ID": lead.id, "Name": lead.full_name, "Email": lead.email, "Phone": lead.phone_number,
+             "Course": lead.course, "Source": lead.source, "Source Category": lead.source_category,
+             "Status": lead.status_of_lead, "Sales Owner": lead.sales_owner, "Created At": lead.created_at,
+             "Updated At": lead.updated_at} for lead in leads]
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer: pd.DataFrame(rows).to_excel(writer, sheet_name="Main CRM", index=False)
+    output.seek(0)
+    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="main-crm-export.xlsx"'})
 
 
 def activity_dict(activity, lead=None):
@@ -310,7 +399,9 @@ def list_campaign_activities(current_user: User = Depends(get_current_user), db:
 def get_main_crm_lead(lead_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     lead = accessible_lead(db, lead_id, current_user)
     counselor = db.get(User, lead.assigned_to_user_id) if lead.assigned_to_user_id else None
-    activities = db.execute(select(MainCrmActivity).where(MainCrmActivity.lead_id == lead.id).order_by(
+    activities = db.execute(select(MainCrmActivity).where(
+        MainCrmActivity.lead_id == lead.id, MainCrmActivity.activity_type != "EDIT"
+    ).order_by(
         MainCrmActivity.activity_date.desc(), MainCrmActivity.id.desc()
     )).scalars().all()
     migrated = any(item.activity_type == "MIGRATION" for item in activities)
@@ -328,6 +419,9 @@ def get_main_crm_lead(lead_id: int, current_user: User = Depends(get_current_use
         profile["migration_updated_at"] = latest[1] if latest else None
     return {"lead": profile,
             "activities": [activity_dict(item) for item in activities],
+            "changes": [activity_dict(item) for item in db.scalars(select(MainCrmActivity).where(
+                MainCrmActivity.lead_id == lead.id, MainCrmActivity.activity_type == "EDIT"
+            ).order_by(MainCrmActivity.created_at.desc(), MainCrmActivity.id.desc()).limit(10)).all()],
             "lifecycle": customer_lifecycle(db, lead.customer_id, current_user)}
 
 
@@ -368,7 +462,7 @@ def run_background_migration(payload, filename, unique_number, source_categories
         try:
             upload = UploadFile(file=BytesIO(payload), filename=filename)
             result = upload_migration(upload, "UPDATE", unique_number, source_categories, None, db)
-            MIGRATION_PROGRESS[unique_number] = {**MIGRATION_PROGRESS.get(unique_number, {}), "categories": result["categories"]}
+            MIGRATION_PROGRESS[unique_number] = {**MIGRATION_PROGRESS.get(unique_number, {}), "categories": result["categories"], "skipped_rows": result.get("skipped_rows", [])}
         except Exception as exc:
             db.rollback()
             message = exc.detail if isinstance(exc, HTTPException) else str(exc)
@@ -418,7 +512,7 @@ def start_migration(
     batch.error_message = None
     batch.uploaded_at = datetime.now(timezone.utc)
     db.commit()
-    MIGRATION_PROGRESS[batch.unique_number] = {"processed": 0, "rows_total": len(df), "rows_imported": 0, "rows_skipped": 0}
+    MIGRATION_PROGRESS[batch.unique_number] = {"processed": 0, "rows_total": len(df), "rows_imported": 0, "rows_skipped": 0, "skipped_rows": []}
     background_tasks.add_task(run_background_migration, payload, file.filename or "migration.xlsx", batch.unique_number, source_categories)
     return {"unique_number": batch.unique_number, "status": "PROCESSING", "rows_total": len(df)}
 
@@ -434,6 +528,22 @@ def migration_progress(unique_number: str, admin_user: User = Depends(require_ad
             "rows_imported": progress.get("rows_imported", batch.rows_imported),
             "rows_skipped": progress.get("rows_skipped", batch.rows_skipped),
             "error_message": batch.error_message, "categories": progress.get("categories")}
+
+
+@router.get("/migration-skipped/{unique_number}")
+def migration_skipped(unique_number: str, admin_user: User = Depends(require_admin)):
+    progress = MIGRATION_PROGRESS.get(unique_number)
+    if progress is None:
+        raise HTTPException(status_code=404, detail="Migration upload not found in this session.")
+    rows = progress.get("skipped_rows") or []
+    output = StringIO(newline="")
+    if rows:
+        keys = list(dict.fromkeys(key for row in rows for key in row))
+        writer = csv.DictWriter(output, fieldnames=keys, extrasaction="ignore"); writer.writeheader(); writer.writerows(rows)
+    else:
+        output.write("row_number,reason\n")
+    output.seek(0)
+    return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="skipped-migration-{unique_number}.csv"'})
 
 
 @router.post("/migration-upload")
@@ -496,6 +606,7 @@ def upload_migration(
             if existing.customer_id: lead_by_customer.setdefault(existing.customer_id, existing)
             if existing.normalized_email: lead_by_email.setdefault(existing.normalized_email, existing)
             if existing.normalized_phone: lead_by_phone.setdefault(existing.normalized_phone, existing)
+        skipped_rows = []
         MIGRATION_PROGRESS[batch.unique_number] = {"processed": 0, "rows_total": len(df), "rows_imported": 0, "rows_skipped": 0}
         for start in range(0, len(df), MIGRATION_CHUNK_SIZE):
             chunk = df.iloc[start:start + MIGRATION_CHUNK_SIZE].to_dict(orient="records")
@@ -506,6 +617,7 @@ def upload_migration(
                 email, phone = migration_contact(row)
                 if not email and not phone:
                     batch.rows_skipped += 1
+                    skipped_rows.append({"row_number": start + len(prepared) + 2, "reason": "Missing email and phone", **dataframe_row_to_dict(row)})
                     continue
                 name = row_value(row, "name")
                 normalized_email = normalize_email(email)
@@ -548,6 +660,8 @@ def upload_migration(
                 counselor = by_email.get(normalize_email(row_value(row, "owneremail"))) or by_name.get((row_value(row, "salesowner") or "").lower())
                 learner = learners_by_email.get(normalized_email) if normalized_email else None
                 if not learner and normalized_phone: learner = learners_by_phone.get(normalized_phone)
+                if customer_is_registered(db, customer.id):
+                    mark_customer_converted(db, customer.id, learner.learner_number if learner else None)
                 try:
                     age = int(float(row_value(row, "age"))) if row_value(row, "age") else None
                     if age is not None and not 0 <= age <= 120: age = None
@@ -598,7 +712,7 @@ def upload_migration(
         batch.status = "COMPLETED"
         db.commit()
         return {"unique_number": batch.unique_number, "rows_total": batch.rows_total,
-                "rows_imported": batch.rows_imported, "rows_skipped": batch.rows_skipped, "categories": categories}
+                "rows_imported": batch.rows_imported, "rows_skipped": batch.rows_skipped, "categories": categories, "skipped_rows": skipped_rows}
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))
@@ -641,7 +755,7 @@ def upload_leads(
         require_columns(df, REQUIRED_COLUMNS[category], category.replace("_", " ").title())
         if progress:
             progress(rows_total=len(df))
-        imported = skipped = 0
+        imported = skipped = 0; skipped_rows = []
         counselors = db.execute(select(User).where(User.role == "COUNSELOR", User.active.is_(True))).scalars().all()
         by_email = {normalize_email(u.email): u for u in counselors if u.email}
         by_name = {u.display_name.strip().lower(): u for u in counselors}
@@ -652,6 +766,7 @@ def upload_leads(
             email = normalize_email(row.get("email")); phone = normalize_phone(row_value(row, "phonenumber", "phone"))
             if not email and not phone:
                 skipped += 1
+                skipped_rows.append({"row_number": processed + 1, "reason": "Missing email and phone", **dataframe_row_to_dict(row)})
                 if progress and (processed % UPLOAD_CHUNK_SIZE == 0 or processed == len(df)):
                     progress(processed=processed, rows_imported=imported, rows_skipped=skipped)
                 continue
@@ -707,7 +822,7 @@ def upload_leads(
                     progress(processed=processed, rows_imported=imported, rows_skipped=skipped)
         batch.rows_imported = imported; batch.rows_skipped = skipped; batch.status = "COMPLETED"
         db.commit()
-        return {"unique_number": batch.unique_number, "rows_total": batch.rows_total, "rows_imported": imported, "rows_skipped": skipped}
+        return {"unique_number": batch.unique_number, "rows_total": batch.rows_total, "rows_imported": imported, "rows_skipped": skipped, "skipped_rows": skipped_rows}
     except Exception as exc:
         db.rollback(); failed = db.get(UploadBatch, batch.id)
         if failed:
@@ -718,8 +833,48 @@ def upload_leads(
 @router.patch("/{lead_id}/status")
 def update_status(lead_id: int, payload: StatusUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     lead = accessible_lead(db, lead_id, current_user)
+    old_status = lead.status_of_lead
     lead.status_of_lead = payload.status.strip().upper(); lead.updated_at = datetime.now(timezone.utc)
+    if old_status != lead.status_of_lead:
+        db.add(MainCrmActivity(lead_id=lead.id, activity_type="STATUS_CHANGE", activity_date=datetime.now(timezone.utc).date(), notes=f"Status changed from {old_status} to {lead.status_of_lead}", raw_data={"from": old_status, "to": lead.status_of_lead}))
     db.commit(); return {"id": lead.id, "status_of_lead": lead.status_of_lead}
+
+
+@router.patch("/{lead_id}/details")
+def update_details(lead_id: int, payload: LeadEditPayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    lead = accessible_lead(db, lead_id, current_user)
+    changes = {}
+    for field in type(payload).model_fields:
+        value = getattr(payload, field)
+        if value is None:
+            continue
+        old = getattr(lead, field)
+        if value != old:
+            changes[field] = {"from": old, "to": value}
+            setattr(lead, field, value)
+            if field == "email": lead.normalized_email = normalize_email(value)
+            if field == "phone_number": lead.normalized_phone = normalize_phone(value)
+    if changes:
+        lead.updated_at = datetime.now(timezone.utc)
+        db.add(MainCrmActivity(
+            lead_id=lead.id, activity_type="EDIT", activity_date=datetime.now(timezone.utc).date(),
+            notes="Lead information updated",
+            raw_data={"changes": changes, "edited_by": {"id": current_user.id, "name": current_user.display_name}},
+        ))
+    db.commit()
+    counselor = db.get(User, lead.assigned_to_user_id) if lead.assigned_to_user_id else None
+    return lead_dict(lead, counselor)
+
+
+@router.post("/{lead_id}/notes")
+def add_note(lead_id: int, payload: LeadNotePayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    lead = accessible_lead(db, lead_id, current_user)
+    note = payload.note.strip()
+    if not note: raise HTTPException(status_code=400, detail="Note cannot be empty.")
+    lead.notes = note; lead.updated_at = datetime.now(timezone.utc)
+    db.add(MainCrmActivity(lead_id=lead.id, activity_type="NOTE", activity_date=datetime.now(timezone.utc).date(), notes=note, raw_data={}))
+    db.commit()
+    return {"ok": True, "note": note}
 
 
 @router.patch("/{lead_id}/assignment")
@@ -728,8 +883,11 @@ def update_assignment(lead_id: int, payload: AssignmentUpdate, admin: User = Dep
     counselor = db.get(User, payload.counselor_user_id) if payload.counselor_user_id else None
     if counselor and (counselor.role != "COUNSELOR" or not counselor.active):
         raise HTTPException(status_code=400, detail="Invalid counselor.")
+    old_counselor = db.get(User, lead.assigned_to_user_id) if lead.assigned_to_user_id else None
     lead.assigned_to_user_id = counselor.id if counselor else None
     if counselor and (counselor.region or counselor.country):
         lead.region = counselor.region or counselor.country
     lead.updated_at = datetime.now(timezone.utc)
+    if (old_counselor.id if old_counselor else None) != (counselor.id if counselor else None):
+        db.add(MainCrmActivity(lead_id=lead.id, activity_type="ASSIGNMENT", activity_date=datetime.now(timezone.utc).date(), notes=f"Counselor changed to {counselor.display_name if counselor else 'Unassigned'}", raw_data={"from": old_counselor.display_name if old_counselor else None, "to": counselor.display_name if counselor else None}))
     db.commit(); return lead_dict(lead, counselor)

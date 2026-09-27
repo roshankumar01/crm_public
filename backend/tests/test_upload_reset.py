@@ -6,10 +6,12 @@ from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.models import (
-    Learner, LearnerCourseRecord, LearnersCrmEnrollment, LearnersCrmProfile,
+    Customer, Lead, Learner, LearnerCourseRecord, LearnersCrmEnrollment, LearnersCrmProfile,
     MainCrmActivity, MainCrmLead, MarketingCampaign, UploadBatch, User, Course,
 )
 from app.routers.uploads import ResetUploadsRequest, reset_selected_uploads
+from app.routers.dashboard import dashboard_summary
+from app.services.lead_workflow import sync_opportunity_leads
 
 
 class UploadResetTests(unittest.TestCase):
@@ -91,6 +93,22 @@ class UploadResetTests(unittest.TestCase):
             with self.assertRaises(HTTPException):
                 reset_selected_uploads(payload, self.admin, self.db)
             self.assertIsNotNone(self.db.get(UploadBatch, batch.id))
+
+    def test_reset_removes_opportunities_from_dashboard_counts(self):
+        batch = UploadBatch(import_type="IGC", filename="igc.csv")
+        course = Course(code="IGC", name="IGC", program_code="IGC")
+        customer = Customer(primary_name="Reset me", primary_email="reset@example.com")
+        learner = Learner(learner_number="RESET-1", customer_id=None, name="Reset me", email_id="reset@example.com")
+        self.db.add_all([batch, course, customer, learner])
+        self.db.flush()
+        learner.customer_id = customer.id
+        self.db.add(LearnerCourseRecord(learner_number="RESET-1", course_id=course.id, upload_batch_id=batch.id,
+            event_date=__import__("datetime").date(2026, 1, 1), result="PASS", row_hash="reset-hash"))
+        self.db.commit()
+        sync_opportunity_leads(self.db)
+        self.assertGreater(self.db.query(Lead).count(), 0)
+        reset_selected_uploads(ResetUploadsRequest(upload_ids=[batch.id], confirmation="DELETE SELECTED UPLOADS"), self.admin, self.db)
+        self.assertEqual(dashboard_summary(self.admin, self.db)["total_opportunities"], 0)
 
 
 if __name__ == "__main__":

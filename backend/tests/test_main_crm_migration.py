@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.models import MainCrmActivity, MainCrmLead, User
+from app.models import Customer, MainCrmActivity, MainCrmLead, User
 from app.routers import main_crm
 from app.routers.main_crm import backfill_migration_statuses, get_main_crm_lead, lead_summary, list_leads, migration_progress, migration_status, preview_migration, start_migration, upload_migration
 
@@ -142,9 +142,28 @@ class MainCrmMigrationTests(unittest.TestCase):
         self.assertEqual(list_leads(self.admin, self.db, 2, 50, "DIRECT_CALLS", "")["total"], 0)
         summary = lead_summary(self.admin, self.db)
         self.assertEqual(summary["total"], 1100)
-        self.assertEqual(summary["source_counts"]["INFO_EMAIL_LEADS"], 1100)
+        self.assertEqual(summary["source_category_counts"]["INFO_EMAIL_LEADS"], 1100)
         self.assertEqual(list_leads(self.counselor, self.db, 1, 50, "ALL", "")["total"], 0)
         self.assertEqual(lead_summary(self.counselor, self.db)["total"], 0)
+
+    def test_information_edits_have_actor_and_appear_only_in_edit_history(self):
+        customer = Customer(primary_name="Ada", primary_email="old@example.com")
+        self.db.add(customer)
+        self.db.flush()
+        lead = MainCrmLead(customer_id=customer.id, full_name="Ada", email="old@example.com",
+                           source_category="INFO_EMAIL_LEADS", status_of_lead="NEW")
+        self.db.add(lead)
+        self.db.commit()
+
+        main_crm.update_details(lead.id, main_crm.LeadEditPayload(email="new@example.com"), self.admin, self.db)
+        detail = get_main_crm_lead(lead.id, self.admin, self.db)
+        self.assertEqual(detail["lead"]["email"], "new@example.com")
+        self.assertEqual(len(detail["changes"]), 1)
+        self.assertEqual(detail["changes"][0]["raw_data"]["changes"]["email"],
+                         {"from": "old@example.com", "to": "new@example.com"})
+        self.assertEqual(detail["changes"][0]["raw_data"]["edited_by"]["name"], "Admin")
+        self.assertFalse(any(item["activity_type"] == "EDIT" for item in detail["activities"]))
+        self.assertFalse(any(item["title"] == "Edit" for item in detail["lifecycle"]["events"]))
 
 
 if __name__ == "__main__":

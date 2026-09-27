@@ -34,7 +34,7 @@ export default function OpportunitiesPage() {
     setSelectedSection(current => next.sections.some(item => item.key === current) ? current : next.sections[0]?.key || "IGC");
   }, [isAdmin]);
   const loadPage = useCallback(async () => {
-    const data = await getTrackedLeads({ page, page_size: PAGE_SIZE, active_only: viewMode === "CURRENT",
+    const data = await getTrackedLeads({ page, page_size: PAGE_SIZE, active_only: true,
       section: viewMode === "CURRENT" ? selectedSection : undefined, status: statusFilter,
       counselor: isAdmin ? counselorFilter : undefined, search: submittedSearch, sort: sortBy, direction });
     if (page > data.pages) { setPage(data.pages); return; }

@@ -3,7 +3,7 @@ import re
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
-from app.models import Customer, CustomerIdentity, Lead, Learner, LearnersCrmProfile, MainCrmLead, UploadBatch
+from app.models import Customer, CustomerIdentity, Lead, Learner, LearnersCrmProfile, MainCrmLead
 
 
 def normalize_email(value):
@@ -78,11 +78,7 @@ def mark_customer_converted(db: Session, customer_id: int, learner_number=None):
         db.execute(update(MainCrmLead).where(MainCrmLead.customer_id == customer_id).values(
             matched_learner_number=learner_number
         ))
-    migration_batch = select(UploadBatch.id).where(
-        UploadBatch.id == MainCrmLead.upload_batch_id,
-        UploadBatch.import_type == "MAIN_CRM_MIGRATION",
-    ).exists()
-    db.execute(update(MainCrmLead).where(MainCrmLead.customer_id == customer_id, ~migration_batch).values(
+    db.execute(update(MainCrmLead).where(MainCrmLead.customer_id == customer_id).values(
         status_of_lead="CONVERTED"
     ))
 

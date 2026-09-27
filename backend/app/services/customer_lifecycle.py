@@ -31,7 +31,7 @@ def customer_lifecycle(db: Session, customer_id: int | None, user: User):
     if main_leads:
         by_id = {lead.id: lead for lead in main_leads}
         activities = db.scalars(select(MainCrmActivity).where(
-            MainCrmActivity.lead_id.in_(by_id)
+            MainCrmActivity.lead_id.in_(by_id), MainCrmActivity.activity_type != "EDIT"
         ).order_by(MainCrmActivity.id)).all()
         with_activity = {activity.lead_id for activity in activities}
         for lead in main_leads:

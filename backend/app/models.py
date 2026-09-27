@@ -272,6 +272,8 @@ class MainCrmActivity(Base):
 
 
 MAIN_CRM_INDEXES = (
+    Index("ix_main_crm_leads_created_status", MainCrmLead.created_at, MainCrmLead.status_of_lead),
+    Index("ix_main_crm_leads_owner_status_course", MainCrmLead.assigned_to_user_id, MainCrmLead.status_of_lead, MainCrmLead.course),
     Index("ix_main_crm_leads_updated_id", MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()),
     Index("ix_main_crm_leads_source_updated_id", MainCrmLead.source_category, MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()),
     Index("ix_main_crm_leads_owner_updated_id", MainCrmLead.assigned_to_user_id, MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()),

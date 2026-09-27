@@ -1,18 +1,19 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { getLearnersCrmOverview } from "../api";
+import { downloadLearnersCrmExport, getLearnersCrmOverview } from "../api";
 
 export default function LearnersCrmOverviewPage() {
   const [summary, setSummary] = useState(null);
-  const [error, setError] = useState("");
+  const [error, setError] = useState(""); const [period, setPeriod] = useState("all");
 
   useEffect(() => {
-    getLearnersCrmOverview().then(setSummary).catch(requestError => setError(requestError.message));
-  }, []);
+    setSummary(null); getLearnersCrmOverview(period).then(setSummary).catch(requestError => setError(requestError.message));
+  }, [period]);
 
   if (!summary) return <div className="page"><div className="loading-state"><span />{error || "Loading learner overview..."}</div></div>;
 
   return <div className="page">
+    <div className="overview-filter"><label>Date range <select className="search-input" value={period} onChange={event => setPeriod(event.target.value)}><option value="today">Today</option><option value="yesterday">Yesterday</option><option value="last_7_days">Last 7 days</option><option value="last_month">Last 1 month</option><option value="all">All time</option></select></label><button className="secondary-button" onClick={() => downloadLearnersCrmExport(period)}>Download full data</button></div>
     <div className="page-header simple-header"><div><div className="eyebrow">LEARNERS CRM</div><h1>Learner overview</h1><p className="page-description">Registered learners and their course enrolments.</p></div><Link className="primary-button" to="/learners-crm/learners">Find learner &rarr;</Link></div>
     <div className="simple-stats">
       <div className="simple-stat main"><span>Total learners</span><strong>{summary.total_learners}</strong><small>Unique email addresses</small></div>

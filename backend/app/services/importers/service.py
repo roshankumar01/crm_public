@@ -28,6 +28,7 @@ def import_course_file(db: Session, import_type: str, upload_file, progress=None
 
         imported = 0
         skipped = 0
+        skipped_rows = []
         course_cache = {course.code: course for course in db.scalars(select(Course))}
         known_hashes = set(db.scalars(select(LearnerCourseRecord.row_hash)))
 
@@ -37,6 +38,7 @@ def import_course_file(db: Session, import_type: str, upload_file, progress=None
                 normalized_records = importer.parse_row(row)
                 if not normalized_records:
                     skipped += 1
+                    skipped_rows.append({"row_number": len(skipped_rows) + 2, "reason": "Row could not be parsed", **raw_data})
                     continue
 
                 for normalized in normalized_records:
@@ -44,6 +46,7 @@ def import_course_file(db: Session, import_type: str, upload_file, progress=None
                         imported += 1
                     else:
                         skipped += 1
+                        skipped_rows.append({"row_number": len(skipped_rows) + 2, "reason": "Duplicate or invalid record", **raw_data})
             db.flush()
             if progress:
                 progress(processed=processed, rows_imported=imported, rows_skipped=skipped)
@@ -55,6 +58,7 @@ def import_course_file(db: Session, import_type: str, upload_file, progress=None
             mark_opportunities_dirty(db)
         db.commit()
         db.refresh(batch)
+        batch.skipped_rows = skipped_rows
         return batch
 
     except Exception as exc:

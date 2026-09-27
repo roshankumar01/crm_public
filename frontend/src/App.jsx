@@ -11,6 +11,7 @@ import OpportunitiesPage from "./pages/OpportunitiesPage.jsx";
 import MainCrmPage from "./pages/MainCrmPage.jsx";
 import MainCrmOverviewPage from "./pages/MainCrmOverviewPage.jsx";
 import MainCrmAnalyticsPage from "./pages/MainCrmAnalyticsPage.jsx";
+import MainCrmMismatchPage from "./pages/MainCrmMismatchPage.jsx";
 import SettingsPage from "./pages/SettingsPage.jsx";
 import CourseMappingSettingsPage from "./pages/CourseMappingSettingsPage.jsx";
 import RecommendationRulesSettingsPage from "./pages/RecommendationRulesSettingsPage.jsx";
@@ -19,6 +20,7 @@ import LearnersCrmOverviewPage from "./pages/LearnersCrmOverviewPage.jsx";
 import LearnersCrmSearchPage from "./pages/LearnersCrmSearchPage.jsx";
 import LearnersCrmDetailPage from "./pages/LearnersCrmDetailPage.jsx";
 import DataUploadsPage from "./pages/DataUploadsPage.jsx";
+import CompanyDashboardPage from "./pages/CompanyDashboardPage.jsx";
 
 function RequireAuth() {
   const { user, loading } = useAuth();
@@ -40,9 +42,15 @@ export default function App() {
           <Route element={<RequireAuth />}>
             <Route element={<AppLayout />}>
               <Route path="/crm" element={<MainCrmOverviewPage />} />
+              <Route element={<RequireAdmin />}>
+                <Route path="/dashboard" element={<CompanyDashboardPage section="overview" />} />
+                <Route path="/dashboard/sales" element={<CompanyDashboardPage section="sales" />} />
+                <Route path="/dashboard/dinesh" element={<CompanyDashboardPage section="dinesh" />} />
+              </Route>
               <Route path="/crm/leads" element={<MainCrmPage />} />
               <Route path="/crm/leads/:leadId" element={<MainCrmLeadDetailPage />} />
               <Route path="/crm/analytics" element={<MainCrmAnalyticsPage />} />
+              <Route path="/crm/mismatch" element={<MainCrmMismatchPage />} />
               <Route path="/crm/campaigns" element={<Navigate to="/crm" replace />} />
               <Route element={<RequireAdmin />}>
                 <Route path="/crm/uploads" element={<DataUploadsPage />} />

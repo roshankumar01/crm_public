@@ -17,20 +17,22 @@ router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
 @router.get("/leads")
 def get_lead_analytics(
+    period: str = "all",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return build_lead_analytics(db, current_user)
+    return build_lead_analytics(db, current_user, period)
 
 
 @router.get("/leads/export")
 def export_lead_analytics(
     opportunity_key: str | None = Query(default=None),
+    period: str = "all",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    analytics = build_lead_analytics(db, current_user)
-    leads = scoped_leads(db, current_user)
+    analytics = build_lead_analytics(db, current_user, period)
+    leads = scoped_leads(db, current_user, period)
     if opportunity_key:
         leads = [lead for lead in leads if section_key(lead.opportunity_key, lead.stage) == opportunity_key and lead.is_active]
     lead_ids = [lead.id for lead in leads]
