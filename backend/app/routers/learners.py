@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -5,8 +7,10 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Course, Customer, Lead, Learner, LearnerCourseRecord, LearnersCrmEnrollment, LearnersCrmProfile, MarketingCampaign, User
 from app.services.auth import get_current_user, require_admin
+from app.services.upsell_management import contact_info, contact_infos
 from app.services.course_rules import is_completed
 from app.services.customer_lifecycle import customer_lifecycle
+from app.services.counselor_sync import main_counselors, counselor_fields
 from app.services.lead_workflow import sync_opportunity_leads
 from app.services.learner_course_mapping import mapping_for_course_names, normalize_course_name
 from app.services.opportunities import SECTION_CONFIG, section_key
@@ -33,6 +37,7 @@ def get_contacts(
     total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
     customers = db.scalars(query.order_by(Customer.updated_at.desc(), Customer.id.desc()).offset((page - 1) * 50).limit(50)).all()
     customer_ids = [item.id for item in customers]
+    owners = main_counselors(db, customer_ids)
     board_numbers = {}
     profiles_by_customer = {}
     if customer_ids:
@@ -40,9 +45,10 @@ def get_contacts(
             board_numbers.setdefault(linked_id, number)
         for profile in db.scalars(select(LearnersCrmProfile).where(LearnersCrmProfile.customer_id.in_(customer_ids))):
             profiles_by_customer.setdefault(profile.customer_id, profile)
-    items = [{"customer_id": item.id, "name": item.primary_name or (profiles_by_customer[item.id].learner_name if item.id in profiles_by_customer else "Learner"),
-             "email_id": item.primary_email or (profiles_by_customer[item.id].email_id if item.id in profiles_by_customer else None),
-             "contact_number": item.primary_phone or (profiles_by_customer[item.id].phone_number if item.id in profiles_by_customer else None),
+    info = contact_infos(db, [SimpleNamespace(customer_id=item.id, learner_number=board_numbers.get(item.id)) for item in customers])
+    items = [{**counselor_fields(owners, item.id), "customer_id": item.id, "name": info[item.id][0]["full_name"] or "Learner",
+             "email_id": info[item.id][0]["email"],
+             "contact_number": info[item.id][0]["phone_number"],
              "last_activity_date": item.updated_at.date(),
              "learner_number": board_numbers.get(item.id)}
             for item in customers]
@@ -97,10 +103,12 @@ def get_contact(
                          "result": record.result, "details": record.details})
     campaigns = db.scalars(select(MarketingCampaign).where(MarketingCampaign.learner_number.in_(numbers))
                            .order_by(MarketingCampaign.created_at.desc()).limit(20)).all() if numbers else []
-    return {"learner": {"customer_id": customer.id, "learner_number": numbers[0] if numbers else None,
-                         "name": customer.primary_name or (profiles[0].learner_name if profiles else "Learner"),
-                         "email_id": customer.primary_email or (profiles[0].email_id if profiles else None),
-                         "contact_number": customer.primary_phone or (profiles[0].phone_number if profiles else None),
+    owners = main_counselors(db, [customer.id])
+    info, _, _ = contact_info(db, SimpleNamespace(customer_id=customer.id, learner_number=numbers[0] if numbers else None))
+    return {"learner": {**counselor_fields(owners, customer.id), "customer_id": customer.id, "learner_number": numbers[0] if numbers else None,
+                         "name": info["full_name"] or "Learner",
+                         "email_id": info["email"],
+                         "contact_number": info["phone_number"],
                          "last_activity_date": customer.updated_at.date()},
             "passed_courses": list(dict.fromkeys(passed)),
             "recommendations": [{"code": item.target_code,
@@ -133,8 +141,10 @@ def get_learners(
         query.order_by(Learner.last_activity_date.desc().nullslast())
     ).scalars().all()
 
+    owners = main_counselors(db, [learner.customer_id for learner in learners])
     return [
         {
+            **counselor_fields(owners, learner.customer_id),
             "learner_number": learner.learner_number,
             "name": learner.name,
             "nationality": learner.nationality,

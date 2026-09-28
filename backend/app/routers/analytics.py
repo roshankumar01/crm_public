@@ -3,14 +3,18 @@ from io import BytesIO
 import pandas as pd
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Customer, Lead, LeadActivity, Learner, MarketingCampaign, User
+from app.models import Customer, Lead, LeadActivity, Learner, MarketingCampaign, UpsellCourseCase, UpsellCourseActivity, User
 from app.services.auth import get_current_user
 from app.services.lead_analytics import build_lead_analytics, scoped_leads
 from app.services.opportunities import section_key
+
+def excel_value(value):
+    return value.isoformat() if getattr(value, "tzinfo", None) is not None else value
+
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
@@ -122,13 +126,18 @@ def export_lead_analytics(
         ]
 
     if opportunity_key:
+        from app.services.upsell_management import work_items
+        from app.services.date_filters import period_condition
+        W = work_items().c
+        case_counts = dict(db.execute(select(W.status, func.count()).where(W.id.in_(lead_ids),
+            *period_condition(W.created_at, period)).group_by(W.status)).all())
         summary_rows = [
             {"Metric": "Current opportunity", "Value": opportunity_key.replace("_", " ").title()},
-            {"Metric": "Leads", "Value": len(leads)},
-            {"Metric": "New", "Value": sum(lead.status == "NEW" for lead in leads)},
-            {"Metric": "In contact", "Value": sum(lead.status == "IN_CONTACT" for lead in leads)},
-            {"Metric": "Converted", "Value": sum(lead.status == "CONVERTED" for lead in leads)},
-            {"Metric": "Rejected", "Value": sum(lead.status == "REJECTED" for lead in leads)},
+            {"Metric": "Leads", "Value": sum(case_counts.values())},
+            {"Metric": "New", "Value": case_counts.get("NEW", 0)},
+            {"Metric": "In contact", "Value": case_counts.get("IN_CONTACT", 0)},
+            {"Metric": "Converted", "Value": case_counts.get("CONVERTED", 0)},
+            {"Metric": "Rejected", "Value": case_counts.get("REJECTED", 0)},
         ]
     else:
         summary_rows = [
@@ -136,18 +145,30 @@ def export_lead_analytics(
             for key, value in analytics["summary"].items()
         ]
 
+    cases = db.scalars(select(UpsellCourseCase).where(UpsellCourseCase.lead_id.in_(lead_ids)).order_by(UpsellCourseCase.id)).all() if lead_ids else []
+    course_rows = [{"Lead ID": item.lead_id, "Panel ID": item.id, "Main Category": item.main_category,
+        "Subcategory": item.sub_category, "Course": item.course_name, "Status": item.status,
+        "Converted At": item.converted_at.isoformat() if item.converted_at else None,
+        "Counselor ID": item.counselor_id, "Converted By ID": item.converted_by_id} for item in cases]
+    course_activities = db.scalars(select(UpsellCourseActivity).where(UpsellCourseActivity.case_id.in_([item.id for item in cases]))).all() if cases else []
+    course_history_rows = [{"Panel ID": item.case_id, "Activity": item.activity_type, "Campaign": item.campaign_name,
+        "Notes": item.notes, "User ID": item.user_id, "Created At": item.created_at.isoformat(),
+        "Edited By ID": item.edited_by_id, "Edited At": item.updated_at.isoformat() if item.updated_at else None} for item in course_activities]
+
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False)
-        pd.DataFrame(lead_rows).to_excel(writer, sheet_name="Leads", index=False)
+        pd.DataFrame(lead_rows).map(excel_value).to_excel(writer, sheet_name="Leads", index=False)
         pd.DataFrame(analytics["counselor_breakdown"]).to_excel(
             writer, sheet_name="Counselor Breakdown", index=False
         )
         pd.DataFrame(analytics["target_breakdown"]).to_excel(
             writer, sheet_name="Target Breakdown", index=False
         )
-        pd.DataFrame(activity_rows).to_excel(writer, sheet_name="CRM Activities", index=False)
-        pd.DataFrame(campaign_rows).to_excel(writer, sheet_name="Campaigns", index=False)
+        pd.DataFrame(activity_rows).map(excel_value).to_excel(writer, sheet_name="CRM Activities", index=False)
+        pd.DataFrame(campaign_rows).map(excel_value).to_excel(writer, sheet_name="Campaigns", index=False)
+        pd.DataFrame(course_rows).to_excel(writer, sheet_name="Course Conversations", index=False)
+        pd.DataFrame(course_history_rows).to_excel(writer, sheet_name="Course Contact History", index=False)
     output.seek(0)
 
     filename = f"{opportunity_key.lower()}-current-leads.xlsx" if opportunity_key else ("lead-analytics.xlsx" if current_user.role == "ADMIN" else "my-lead-analytics.xlsx")

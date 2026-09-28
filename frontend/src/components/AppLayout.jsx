@@ -26,7 +26,7 @@ export default function AppLayout() {
         <nav className="nav"><NavItem to="/dashboard" end icon="dashboard">Overview</NavItem><NavItem to="/dashboard/sales" icon="analytics">Sales</NavItem><NavItem to="/dashboard/dinesh" icon="learners">Dinesh</NavItem></nav>
       </> : isUpsell ? <>
         <div className="nav-label">Upsell menu</div>
-        <nav className="nav"><NavItem to="/upsell" end icon="dashboard">Overview</NavItem>{isAdmin && <NavItem to="/upsell/learners" icon="learners">Learners</NavItem>}<NavItem to="/upsell/opportunities" icon="leads">{isAdmin ? "Lead pipeline" : "My leads"}</NavItem><NavItem to="/upsell/lead-analytics" icon="analytics">Analytics</NavItem></nav>
+        <nav className="nav"><NavItem to="/upsell" end icon="dashboard">Overview</NavItem>{isAdmin && <NavItem to="/upsell/learners" icon="learners">Learners</NavItem>}<NavItem to="/upsell/opportunities" icon="leads">{isAdmin ? "Lead pipeline" : "My leads"}</NavItem><NavItem to="/upsell/lead-analytics" icon="analytics">Analytics</NavItem><NavItem to="/upsell/mismatch" icon="analytics">Mismatch</NavItem></nav>
       </> : isLearnersCrm ? <>
         <div className="nav-label">Learners CRM menu</div>
         <nav className="nav"><NavItem to="/learners-crm" end icon="dashboard">Overview</NavItem><NavItem to="/learners-crm/learners" icon="learners">Find learner</NavItem></nav>

@@ -3,6 +3,7 @@ import AppLayout from "./components/AppLayout.jsx";
 import { AuthProvider, useAuth } from "./context/AuthContext.jsx";
 import DashboardPage from "./pages/DashboardPage.jsx";
 import LeadAnalyticsPage from "./pages/LeadAnalyticsPage.jsx";
+import UpsellMismatchPage from "./pages/UpsellMismatchPage.jsx";
 import LeadDetailPage from "./pages/LeadDetailPage.jsx";
 import LearnerDetailPage from "./pages/LearnerDetailPage.jsx";
 import LearnersPage from "./pages/LearnersPage.jsx";
@@ -63,6 +64,7 @@ export default function App() {
               <Route path="/upsell/opportunities" element={<OpportunitiesPage />} />
               <Route path="/upsell/opportunities/idp" element={<OpportunitiesPage />} />
               <Route path="/upsell/leads/:leadId" element={<LeadDetailPage />} />
+              <Route path="/upsell/mismatch" element={<UpsellMismatchPage />} />
               <Route path="/upsell/lead-analytics" element={<LeadAnalyticsPage />} />
               <Route path="/upsell/campaigns" element={<Navigate to="/upsell" replace />} />
               <Route path="/upsell/learners/:learnerNumber" element={<LearnerDetailPage />} />

@@ -12,6 +12,7 @@ from app.models import Course, Lead, LearnerCourseRecord, MainCrmLead, User
 from app.services.auth import require_admin
 from app.services.date_filters import period_bounds
 from app.services.lead_workflow import sync_opportunity_leads
+from app.services.upsell_management import work_items
 
 router = APIRouter(prefix="/company-dashboard", tags=["Company dashboard"])
 
@@ -96,9 +97,10 @@ def overview(period: str = Query("all"), admin: User = Depends(require_admin), d
                              .group_by(MainCrmLead.course)
                              .order_by(func.count(MainCrmLead.id).desc(), MainCrmLead.course.asc()).limit(7)).all()
     sync_opportunity_leads(db)
-    upsell_filters = [Lead.is_active.is_(True), *_conditions(Lead.created_at, bounds)]
+    W = work_items().c
+    upsell_filters = _conditions(W.created_at, bounds)
     upsell_total, upsell_converted = db.execute(select(
-        func.count(Lead.id), func.sum(case((Lead.status == "CONVERTED", 1), else_=0))
+        func.count(W.id), func.sum(case((W.status == "CONVERTED", 1), else_=0))
     ).where(*upsell_filters)).one()
     upsell_converted = upsell_converted or 0
     return {

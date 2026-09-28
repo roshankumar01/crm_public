@@ -6,7 +6,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Customer, Lead, LeadActivity, Learner, MarketingCampaign, User
+from app.models import Customer, Lead, LeadActivity, Learner, MarketingCampaign, UpsellCourseCase, User
 from app.services.auth import get_current_user, require_admin
 from app.services.lead_workflow import (
     add_lead_activity,
@@ -15,6 +15,7 @@ from app.services.lead_workflow import (
     get_accessible_lead,
     sync_opportunity_leads,
 )
+from app.services.upsell_management import contact_info, contact_infos, contact_key
 from app.services.opportunities import SECTION_CONFIG, section_filter, section_key
 
 router = APIRouter(prefix="/leads", tags=["Leads"])
@@ -120,14 +121,15 @@ def get_tracked_leads(
         ).label("rank")).where(MarketingCampaign.learner_number.in_(learner_numbers)).subquery()
         for campaign in db.scalars(select(MarketingCampaign).join(ranked, MarketingCampaign.id == ranked.c.id).where(ranked.c.rank == 1)):
             latest_campaign[campaign.learner_number] = campaign
+    person_info = contact_infos(db, [lead for lead, _, _, _ in rows])
     items = [
         {
             "lead_id": lead.id,
             "customer_id": lead.customer_id,
             "learner_number": lead.learner_number,
-            "name": customer.primary_name if customer else learner.name if learner else "Unknown",
-            "email_id": customer.primary_email if customer else learner.email_id if learner else None,
-            "contact_number": customer.primary_phone if customer else learner.contact_number if learner else None,
+            "name": person_info[contact_key(lead)][0]["full_name"] or "Unknown",
+            "email_id": person_info[contact_key(lead)][0]["email"],
+            "contact_number": person_info[contact_key(lead)][0]["phone_number"],
             "target_code": lead.target_code,
             "target_name": SECTION_CONFIG.get(section_key(lead.opportunity_key, lead.stage), (lead.target_code,))[0],
             "stage": lead.stage,
@@ -139,6 +141,7 @@ def get_tracked_leads(
             "is_active": lead.is_active,
             "assigned_to_user_id": lead.assigned_to_user_id,
             "assigned_to_name": counselor.display_name if counselor else None,
+            "assignment_source": "MAIN_CRM" if lead.counselor_from_main else None,
             "updated_at": lead.updated_at,
             "latest_campaign": ({
                 "marketing_type": latest_campaign[lead.learner_number].marketing_type,
@@ -176,6 +179,7 @@ def get_lead(
         .order_by(MarketingCampaign.created_at.desc(), MarketingCampaign.id.desc())
     ).scalars().all() if lead.learner_number else []
 
+    person_info = {contact_key(lead): contact_info(db, lead)}
     return {
         "lead": {
             "id": lead.id,
@@ -190,6 +194,7 @@ def get_lead(
             "is_active": lead.is_active,
             "assigned_to_user_id": lead.assigned_to_user_id,
             "assigned_to_name": counselor.display_name if counselor else None,
+            "assignment_source": "MAIN_CRM" if lead.counselor_from_main else None,
             "assigned_at": lead.assigned_at,
             "status_updated_at": lead.status_updated_at,
             "created_at": lead.created_at,
@@ -198,9 +203,9 @@ def get_lead(
         "learner": {
             "customer_id": lead.customer_id,
             "learner_number": lead.learner_number,
-            "name": customer.primary_name if customer else learner.name if learner else "Unknown",
-            "email_id": customer.primary_email if customer else learner.email_id if learner else None,
-            "contact_number": customer.primary_phone if customer else learner.contact_number if learner else None,
+            "name": person_info[contact_key(lead)][0]["full_name"] or "Unknown",
+            "email_id": person_info[contact_key(lead)][0]["email"],
+            "contact_number": person_info[contact_key(lead)][0]["phone_number"],
             "nationality": learner.nationality if learner else None,
             "last_activity_date": learner.last_activity_date if learner else None,
         },
@@ -236,6 +241,14 @@ def update_status(
     db: Session = Depends(get_db),
 ):
     lead = get_accessible_lead(db, lead_id, current_user)
+    if payload.status.strip().upper() == "CONVERTED":
+        raise HTTPException(409, "Open Manage, choose a mapped course and use Update converted.")
+    current_case = db.scalar(select(UpsellCourseCase).where(UpsellCourseCase.lead_id == lead.id, UpsellCourseCase.current_slot == 1))
+    if current_case:
+        from app.routers.upsell_management import case_status, CaseStatus
+        case_status(lead.id, current_case.id, CaseStatus(status=payload.status), current_user, db)
+        db.refresh(lead)
+        return {"id": lead.id, "status": lead.status, "status_updated_at": lead.status_updated_at}
     updated = change_lead_status(db, lead, payload.status, current_user)
     return {"id": updated.id, "status": updated.status, "status_updated_at": updated.status_updated_at}
 
@@ -254,6 +267,7 @@ def update_assignment(
         "id": updated.id,
         "assigned_to_user_id": updated.assigned_to_user_id,
         "assigned_to_name": counselor.display_name if counselor else None,
+            "assignment_source": "MAIN_CRM" if lead.counselor_from_main else None,
         "assigned_at": updated.assigned_at,
     }
 

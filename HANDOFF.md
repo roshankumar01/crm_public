@@ -1,5 +1,26 @@
 # Learning CRM — New Chat Handoff
 
+## Upsell Manage course workflow (September 2026)
+
+- Manage displays suggestions, personal information, three course selectors (main category/subcategory/course), course status/contact history, converted course blocks and the expandable edit history at the bottom.
+- Any mapped course can be selected. A conversion closes that course panel and opens an empty next panel. Existing unfinished panels can be resumed. Contact notes can be edited until conversion; completed blocks preserve their history, conversion date, category, course and counselor.
+- Personal information inherits Main CRM fields, with local Upsell overrides stored separately. Later Main CRM changes supersede the affected local values. Upsell personal edits/status never write to Main CRM or change registration identity keys. The last 10 information edits per lead record actor and before/after values; these edits are excluded from learning journey/contact activity.
+- Course conversions appear in the shared learning journey across workspaces. Existing Main CRM converted leads are shown separately for reference in Manage. A counselor-reported conversion does not manufacture an uploaded registration or overwrite Main CRM lead status.
+- `/upsell/mismatch` checks converted course panels against the same customer and mapped subcategory in Learners CRM or IGC/IDIP results. Course variants within one subcategory match. The report has counselor details, date filtering, pagination and Excel export.
+- New tables: `upsell_contact_info`, `upsell_info_edits`, `upsell_course_cases`, `upsell_course_activities`. Startup also backfills an indexed normalized enrolment course name without altering its update date and preserves legacy conversions without inventing a course variant.
+- Upsell analytics and company dashboard count persistent course conversions so starting another panel cannot erase earlier conversions. Upsell Excel exports include course conversations and their contact history.
+- Backend restart applies schema/index updates automatically; no data reset or re-upload is needed. Docker users rebuild with `docker compose up -d --build`.
+- Tests: `backend/tests/test_upsell_management.py` and `frontend/tests/upsellManagementInteractions.test.mjs`.
+
+## Main CRM counselor inheritance (September 2026)
+
+- Learners CRM and Upsell learner lists/profiles display the Main CRM counselor for their shared customer ID (normalized email/phone matching).
+- Upsell opportunities inherit the actual counselor account, so pipeline filters, analytics and counselor access use the same assignment.
+- If a contact has multiple assigned Main CRM records, the most recently updated record wins; ties use the highest lead ID. Only active counselor accounts qualify.
+- Main CRM imports and assignment changes reconcile existing opportunities. Opportunity creation reconciles newly generated leads. Unmatched manual assignments remain intact; removing the Main CRM owner clears only inherited assignments.
+- Restart the backend after updating: startup adds `leads.counselor_from_main`, creates the contact/date lookup index and reconciles existing assignments. No reset or re-upload is needed.
+- Synchronization lives in `backend/app/services/counselor_sync.py`; page-level owner lookups are batched. Tests: `backend/tests/test_counselor_sync.py`, `frontend/tests/counselorDisplay.test.mjs`.
+
 ## Read this first
 
 > **Current-state note (September 2026):** The original Stage 1 sections below remain useful for the Upsell CRM, but the application has since expanded into two connected workspaces. The "Full CRM expansion" section near the end of this file supersedes older route and limitation notes.
@@ -802,6 +823,16 @@ The shared journey uses the vertical Learning journey design on all three detail
 ---
 
 # Quick prompt for the next chat
+
+## Main CRM pipeline filters and result labels
+
+Main CRM's lead pipeline now has searchable, multi-select counselor, status, actual lead-source, and course filters. A filter panel uses draft selections until Apply filters is pressed; option searches run locally in the browser. Group selections match any selected value, while different groups are combined. Unassigned counselors and empty source/course values are selectable. The API preserves counselor access restrictions for both list results and filter choices. Filters, submitted search, sort order, and pagination are stored in the URL for returning from a profile.
+
+`GET /crm/leads/filter-options` groups visible lead rows to return options and counts. `GET /crm/leads` accepts repeated `counselor_ids`, `statuses`, `sources`, and `courses`, plus whitelisted `sort_by=created_at|updated_at` and `sort_direction=asc|desc`. Results remain paginated at 50 rows by default. The table displays created and updated dates, with clickable column headings and a date-sort control. Ties use lead ID for stable pagination. Added indexes support created-date ordering and status, actual-source, and course filtering with updated-date ordering; the existing startup code creates them automatically.
+
+The shared customer journey labels assessment uploads as Result data IGC or Result data IDP using the upload batch's import type. Historical records without a batch fall back to their course family. This display change applies to every CRM using CustomerLifecycle and does not relabel, delete, or reclassify imported course records.
+
+Verification: all 33 backend tests pass, the frontend builds, and the browser interaction check covers Apply behavior, local option search, date sorting, URL state, result labels, and horizontal table scrolling on smaller screens. New checks are in `backend/tests/test_main_crm_filters.py` and `frontend/tests/pipelineInteractions.test.mjs`.
 
 Copy/paste:
 

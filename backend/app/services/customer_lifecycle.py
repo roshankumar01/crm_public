@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.models import (
     Course, Lead, LeadActivity, Learner, LearnerCourseRecord,
     LearnersCrmEnrollment, LearnersCrmProfile, MainCrmActivity,
-    MainCrmLead, MarketingCampaign, User,
+    MainCrmLead, MarketingCampaign, UploadBatch, UpsellCourseCase, User,
 )
 
 
@@ -16,12 +16,13 @@ def customer_lifecycle(db: Session, customer_id: int | None, user: User):
 
     events = []
 
-    def add(kind, date, title, detail=None, status=None, href=None, key=None, fields=None, raw_data=None):
+    def add(kind, date, title, detail=None, status=None, href=None, key=None, fields=None, raw_data=None, source_label=None):
         events.append({
             "key": key or f"{kind}-{len(events)}", "kind": kind,
             "date": date.isoformat() if date else None,
             "title": title, "detail": detail, "status": status, "href": href,
             "fields": fields or {}, "raw_data": raw_data or {},
+            "source_label": source_label,
         })
 
     main_query = select(MainCrmLead).where(MainCrmLead.customer_id == customer_id)
@@ -81,16 +82,19 @@ def customer_lifecycle(db: Session, customer_id: int | None, user: User):
     learners = db.scalars(select(Learner).where(Learner.customer_id == customer_id)).all()
     if learners:
         numbers = {learner.learner_number for learner in learners}
-        result_rows = db.execute(select(LearnerCourseRecord, Course).join(
+        result_rows = db.execute(select(LearnerCourseRecord, Course, UploadBatch.import_type).join(
             Course, Course.id == LearnerCourseRecord.course_id
+        ).outerjoin(UploadBatch, UploadBatch.id == LearnerCourseRecord.upload_batch_id
         ).where(LearnerCourseRecord.learner_number.in_(numbers)).order_by(
             LearnerCourseRecord.event_date, LearnerCourseRecord.id
         )).all()
-        for record, course in result_rows:
+        for record, course, import_type in result_rows:
+            result_type = import_type or course.program_code or course.code
+            if result_type == "IDIP": result_type = "IDP"
             add("RESULT", record.event_date, course.name,
                 f"Learner #{record.learner_number}", record.result or record.enrollment_status,
                 f"/upsell/learners/{record.learner_number}" if user.role == "ADMIN" else None,
-                f"result-{record.id}", fields=record.details)
+                f"result-{record.id}", fields=record.details, source_label=f"Result data {result_type}")
         campaigns = db.scalars(select(MarketingCampaign).where(
             MarketingCampaign.learner_number.in_(numbers)
         ).order_by(MarketingCampaign.id)).all()
@@ -121,6 +125,17 @@ def customer_lifecycle(db: Session, customer_id: int | None, user: User):
                 activity.notes or activity.campaign_name or lead.target_code,
                 lead.status, f"/upsell/leads/{lead.id}",
                 f"upsell-activity-{activity.id}")
+
+    # Counselor-reported conversions are visible everywhere, separately from uploaded registrations.
+    conversions = db.execute(select(UpsellCourseCase, User.display_name).outerjoin(User, User.id == UpsellCourseCase.counselor_id)
+        .where(UpsellCourseCase.customer_id == customer_id, UpsellCourseCase.status == "CONVERTED")
+        .order_by(UpsellCourseCase.converted_at.desc()).limit(100)).all()
+    for conversion, counselor in conversions:
+        add("UPSELL", conversion.converted_at, f"Course converted: {conversion.course_name}",
+            "Counselor-reported conversion", "CONVERTED", f"/upsell/leads/{conversion.lead_id}",
+            f"course-conversion-{conversion.id}", fields={"main_category": conversion.main_category,
+                "sub_category": conversion.sub_category, "course": conversion.course_name, "counselor": counselor},
+            source_label="Upsell course conversion")
 
     events.sort(key=lambda item: (item["date"] or "", item["key"]), reverse=True)
     return {"customer_id": customer_id, "events": events}

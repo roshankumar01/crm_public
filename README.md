@@ -38,3 +38,15 @@ npm run dev
 Frontend: http://localhost:5173
 
 API docs: http://127.0.0.1:8000/docs
+
+## Docker
+
+For the complete frontend, backend, and PostgreSQL stack, see [Docker setup](docs/DOCKER.md).
+
+```powershell
+Copy-Item .env.example .env
+# Edit .env and set your database and admin passwords.
+docker compose up -d --build
+```
+
+Application: http://localhost:8080

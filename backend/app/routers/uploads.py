@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal, get_db
 from app.models import (
     Lead, LeadActivity, Learner, LearnerCourseRecord, LearnersCrmEnrollment,
-    LearnersCrmProfile, MainCrmActivity, MainCrmLead, MarketingCampaign, UploadBatch, User,
+    LearnersCrmProfile, MainCrmActivity, MainCrmLead, MarketingCampaign, UploadBatch, UpsellCourseCase, User,
 )
 from app.services.auth import require_admin
 from app.services.importers import import_course_file, list_importers
@@ -191,6 +191,7 @@ def reset_selected_uploads(
             has_main_crm_link = db.scalar(select(MainCrmLead.id).where(MainCrmLead.matched_learner_number == learner_number).limit(1))
             lead_ids = select(Lead.id).where(Lead.learner_number == learner_number)
             has_manual_history = db.scalar(select(LeadActivity.id).where(LeadActivity.lead_id.in_(lead_ids)).limit(1))
+            has_manual_history = has_manual_history or db.scalar(select(UpsellCourseCase.id).where(UpsellCourseCase.lead_id.in_(lead_ids)).limit(1))
             if not (has_course or has_campaign or has_main_crm_link or has_manual_history):
                 db.execute(delete(Lead).where(Lead.learner_number == learner_number))
                 db.execute(delete(Learner).where(Learner.learner_number == learner_number))

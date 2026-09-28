@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.models import Lead, User
 from app.services.lead_workflow import sync_opportunity_leads
 from app.services.date_filters import period_condition
+from app.services.upsell_management import work_items
 
 SECTION_CONFIG = {
     "IGC": ("IGC", "Stage 2 · IGC"),
@@ -56,6 +57,10 @@ def get_all_opportunities(db: Session, current_user: User | None = None, period:
         total += count
         if owner is None:
             unassigned += count
+    W = work_items().c
+    work_scope = period_condition(W.created_at, period)
+    if current_user and current_user.role != "ADMIN": work_scope.append(W.assigned_to_user_id == current_user.id)
+    statuses = dict(db.execute(select(W.status, func.count()).where(*work_scope).group_by(W.status)).all())
     unique_learners = db.scalar(select(func.count(func.distinct(Lead.customer_id))).where(*filters)) or 0
     return {
         "summary": {
@@ -63,8 +68,8 @@ def get_all_opportunities(db: Session, current_user: User | None = None, period:
             "total_opportunities": total,
             "idp_entry": counts["IDP_ENTRY"], "id1": counts["ID1"],
             "id2": counts["ID2"], "id3": counts["ID3"],
-            "new": statuses["NEW"], "in_contact": statuses["IN_CONTACT"],
-            "converted": statuses["CONVERTED"], "rejected": statuses["REJECTED"],
+            "new": statuses.get("NEW", 0), "in_contact": statuses.get("IN_CONTACT", 0),
+            "converted": statuses.get("CONVERTED", 0), "rejected": statuses.get("REJECTED", 0),
             "unassigned": unassigned,
             "by_target": [{"key": key, "name": SECTION_CONFIG[key][1], "count": counts[key]} for key in SECTION_ORDER],
         },

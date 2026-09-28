@@ -1,4 +1,4 @@
-const API_URL = "http://127.0.0.1:8000";
+const API_URL = (import.meta.env.VITE_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
 const TOKEN_KEY = "learning_crm_token";
 
 export function getStoredToken() {
@@ -123,10 +123,13 @@ export function startUploadJob({ kind, file, importType, sourceCategory, uploadM
 }
 export const getUploadJobProgress = jobId => request(`/uploads/jobs/${encodeURIComponent(jobId)}`);
 
-export function getMainCrmLeads({ page = 1, pageSize = 50, sourceCategory = "ALL", search = "" } = {}) {
+export function getMainCrmLeads({ page = 1, pageSize = 50, sourceCategory = "ALL", search = "", counselorIds = [], statuses = [], sources = [], courses = [], sortBy = "updated_at", sortDirection = "desc" } = {}) {
   const params = new URLSearchParams({ page: String(page), page_size: String(pageSize), source_category: sourceCategory, search });
+  for (const [key, values] of [["counselor_ids", counselorIds], ["statuses", statuses], ["sources", sources], ["courses", courses]]) values.forEach(value => params.append(key, value));
+  params.set("sort_by", sortBy); params.set("sort_direction", sortDirection);
   return request(`/crm/leads?${params}`);
 }
+export const getMainCrmFilterOptions = sourceCategory => request(`/crm/leads/filter-options?source_category=${encodeURIComponent(sourceCategory || "ALL")}`);
 export const getMainCrmSummary = (period = "all") => request(`/crm/leads/summary?period=${encodeURIComponent(period)}`);
 const companyDashboardQuery = (range = {}) => {
   const params = new URLSearchParams();
@@ -211,3 +214,17 @@ export function uploadLearnersCrm(file, uploadMode = "CREATE", uniqueNumber = ""
   if (uniqueNumber) formData.append("unique_number", uniqueNumber);
   return request("/learners-crm/upload", { method: "POST", body: formData });
 }
+
+// Course conversations and personal edits remain within Upsell.
+export const getUpsellManagement = (id, page=1) => request(`/upsell/manage/${id}?history_page=${page}`);
+export const getUpsellCourseCatalog = () => request("/upsell/manage/catalog");
+export const editUpsellInfo = (id, payload) => request(`/upsell/manage/${id}/info`, {method:"PATCH",body:JSON.stringify(payload)});
+export const chooseUpsellCourse = (id, mapping_id) => request(`/upsell/manage/${id}/cases`, {method:"POST",body:JSON.stringify({mapping_id})});
+export const setUpsellCourseStatus = (id, caseId, status) => request(`/upsell/manage/${id}/cases/${caseId}/status`, {method:"PATCH",body:JSON.stringify({status})});
+export const saveUpsellCourseActivity = (id, caseId, payload) => request(`/upsell/manage/${id}/cases/${caseId}/activities`, {method:"POST",body:JSON.stringify(payload)});
+export const editUpsellCourseActivity = (id, caseId, activityId, payload) => request(`/upsell/manage/${id}/cases/${caseId}/activities/${activityId}`, {method:"PATCH",body:JSON.stringify(payload)});
+export const convertUpsellCourse = (id, caseId) => request(`/upsell/manage/${id}/cases/${caseId}/convert`, {method:"POST"});
+export const getUpsellMismatch = (period="all",page=1) => request(`/upsell/manage/mismatch?period=${encodeURIComponent(period)}&page=${page}`);
+export const downloadUpsellMismatch = period => downloadCrmExport(`/upsell/manage/mismatch/export?period=${encodeURIComponent(period)}`,"upsell-mismatch.xlsx");
+
+export const getUpsellContactHistory = (id,caseId,page=1) => request(`/upsell/manage/${id}/history/${caseId}?page=${page}`);

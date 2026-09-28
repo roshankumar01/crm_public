@@ -15,6 +15,7 @@ from app.models import LearnersCrmEnrollment, LearnersCrmProfile, MainCrmLead, U
 from app.services.auth import get_current_user, require_admin
 from app.services.customer_identity import mark_customer_converted, normalize_phone, resolve_customer
 from app.services.customer_lifecycle import customer_lifecycle
+from app.services.counselor_sync import main_counselors, counselor_fields
 from app.services.importers.common import clean, clean_learner_number, dataframe_row_to_dict, parse_date, read_upload, require_columns, upload_chunks
 from app.services.learner_course_mapping import categories_for_course_names, mapping_for_course_names, normalize_course_name
 from app.services.lead_workflow import mark_opportunities_dirty
@@ -64,7 +65,9 @@ def overview(current_user: User = Depends(get_current_user), db: Session = Depen
 def export_learners(period: str = "all", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     filters = period_condition(LearnersCrmEnrollment.created_at, period)
     rows = db.execute(select(LearnersCrmProfile, LearnersCrmEnrollment).join(LearnersCrmEnrollment, LearnersCrmEnrollment.learner_id == LearnersCrmProfile.id).where(*filters).order_by(LearnersCrmEnrollment.created_at.desc())).all()
-    values = [{"Learner": profile.learner_name, "Email": profile.email_id, "Phone": profile.phone_number,
+    owners = main_counselors(db, [profile.customer_id for profile, _ in rows])
+    values = [{"Counselor": counselor_fields(owners, profile.customer_id)["assigned_to_name"] or "Unassigned",
+               "Counselor Email": counselor_fields(owners, profile.customer_id)["assigned_to_email"], "Learner": profile.learner_name, "Email": profile.email_id, "Phone": profile.phone_number,
                "Enrolment ID": enrollment.enrolment_id, "Course": enrollment.course_name,
                "Enrolment Date": enrollment.enrolment_date, "Completion Date": enrollment.completion_date,
                "Completion Status": enrollment.completion_status, "Created At": enrollment.created_at,
@@ -108,6 +111,7 @@ def search_learners(
 def learner_profiles_payload(db, profiles, preview_limit=None):
     if not profiles:
         return []
+    owners = main_counselors(db, [profile.customer_id for profile in profiles])
     profile_ids = [profile.id for profile in profiles]
     statement = select(LearnersCrmEnrollment).where(LearnersCrmEnrollment.learner_id.in_(profile_ids))
     if preview_limit is not None:
@@ -134,6 +138,7 @@ def learner_profiles_payload(db, profiles, preview_limit=None):
             "updated_at": enrolment.updated_at,
         })
     return [{
+        **counselor_fields(owners, profile.customer_id),
         "id": profile.id, "learner_name": profile.learner_name,
         "email_id": profile.email_id, "phone_number": profile.phone_number,
         "created_at": profile.created_at, "updated_at": profile.updated_at,

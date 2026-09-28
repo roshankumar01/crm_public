@@ -6,8 +6,9 @@ from fastapi import HTTPException
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from app.models import AppSetting, Course, Lead, LeadActivity, Learner, LearnerCourseRecord, LearnersCrmEnrollment, LearnersCrmProfile, User
+from app.models import AppSetting, Course, Lead, LeadActivity, Learner, LearnerCourseRecord, LearnersCrmEnrollment, LearnersCrmProfile, UpsellCourseCase, User
 from app.services.course_rules import STAGE_ONE, build_customer_opportunities, get_cooling_days
+from app.services.counselor_sync import sync_main_counselors
 from app.services.learner_course_mapping import mapping_for_course_names, normalize_course_name
 
 VALID_LEAD_STATUSES = ("NEW", "IN_CONTACT", "REJECTED", "CONVERTED")
@@ -134,7 +135,11 @@ def sync_opportunity_leads(db: Session):
                 lead.trigger_date = opportunity.get("trigger_date")
                 lead.is_active = True
 
+    managed_ids = set(db.scalars(select(UpsellCourseCase.lead_id).distinct()))
     for lead in existing_leads:
+        if lead.id in managed_ids:
+            lead.is_active = True
+            continue
         if (lead.customer_id, lead.opportunity_key) not in current_keys or by_key.get((lead.customer_id, lead.opportunity_key)) is not lead:
             lead.is_active = False
 
@@ -146,6 +151,7 @@ def sync_opportunity_leads(db: Session):
         next_refresh.value = next_eligibility.isoformat() if next_eligibility else ""
     else:
         db.add(AppSetting(key=OPPORTUNITY_NEXT_REFRESH_KEY, value=next_eligibility.isoformat() if next_eligibility else ""))
+    sync_main_counselors(db)
     db.commit()
 
 
@@ -200,6 +206,7 @@ def assign_lead(db: Session, lead: Lead, counselor_user_id: int | None, admin_us
         return lead
 
     lead.assigned_to_user_id = counselor_user_id
+    lead.counselor_from_main = False
     lead.assigned_at = datetime.now(timezone.utc) if counselor_user_id is not None else None
     new_name = counselor.display_name if counselor else "Unassigned"
     db.add(

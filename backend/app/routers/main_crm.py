@@ -18,6 +18,7 @@ from app.models import AuthSession, Customer, CustomerIdentity, Learner, Learner
 from app.services.auth import get_current_user, hash_password, require_admin
 from app.services.customer_identity import customer_is_registered, mark_customer_converted, resolve_customer
 from app.services.customer_lifecycle import customer_lifecycle
+from app.services.counselor_sync import sync_main_counselors
 from app.services.importers.common import clean, dataframe_row_to_dict, parse_date, read_upload, require_columns, upload_rows, UPLOAD_CHUNK_SIZE
 from app.services.date_filters import period_condition
 
@@ -250,6 +251,11 @@ def list_leads(
     current_user: User = Depends(get_current_user), db: Session = Depends(get_db),
     page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
     source_category: str = Query("ALL"), search: str = Query("", max_length=320),
+    counselor_ids: Annotated[list[str] | None, Query()] = None,
+    statuses: Annotated[list[str] | None, Query()] = None,
+    sources: Annotated[list[str] | None, Query()] = None,
+    courses: Annotated[list[str] | None, Query()] = None,
+    sort_by: str = "updated_at", sort_direction: str = "desc",
 ):
     category = source_category.strip().upper()
     if category not in {"ALL", *SOURCE_CATEGORIES}:
@@ -259,6 +265,20 @@ def list_leads(
         filters.append(MainCrmLead.assigned_to_user_id == current_user.id)
     if category != "ALL":
         filters.append(MainCrmLead.source_category == category)
+    if counselor_ids:
+        owner_filters = []
+        for value in counselor_ids:
+            if value == "UNASSIGNED": owner_filters.append(MainCrmLead.assigned_to_user_id.is_(None))
+            elif value.isdigit() and int(value) > 0: owner_filters.append(MainCrmLead.assigned_to_user_id == int(value))
+            else: raise HTTPException(status_code=400, detail="Invalid counselor filter.")
+        filters.append(or_(*owner_filters))
+    for column, values in ((MainCrmLead.status_of_lead, statuses), (MainCrmLead.source, sources), (MainCrmLead.course, courses)):
+        if values:
+            matches = [column.in_([value for value in values if value != "__EMPTY__"])]
+            if "__EMPTY__" in values: matches.append(or_(column.is_(None), column == ""))
+            filters.append(or_(*matches))
+    if sort_by not in {"created_at", "updated_at"} or sort_direction not in {"asc", "desc"}:
+        raise HTTPException(status_code=400, detail="Invalid date sort option.")
     term = search.strip()
     if term:
         pattern = f"%{term}%"
@@ -271,11 +291,42 @@ def list_leads(
     total = db.scalar(select(func.count()).select_from(MainCrmLead).where(*filters)) or 0
     migrated = select(MainCrmActivity.id).where(MainCrmActivity.lead_id == MainCrmLead.id, MainCrmActivity.activity_type == "MIGRATION").exists()
     query = select(MainCrmLead, User, migrated).outerjoin(User, MainCrmLead.assigned_to_user_id == User.id).where(*filters)
-    rows = db.execute(query.order_by(MainCrmLead.updated_at.desc(), MainCrmLead.id.desc())
+    sort_column = getattr(MainCrmLead, sort_by)
+    order = sort_column.asc() if sort_direction == "asc" else sort_column.desc()
+    tie_breaker = MainCrmLead.id.asc() if sort_direction == "asc" else MainCrmLead.id.desc()
+    rows = db.execute(query.order_by(order, tie_breaker)
                       .limit(page_size).offset((page - 1) * page_size)).all()
     return {"items": [lead_dict(lead, counselor, is_migrated) for lead, counselor, is_migrated in rows],
             "total": total, "page": page, "page_size": page_size,
             "pages": max(1, (total + page_size - 1) // page_size)}
+
+
+@router.get("/filter-options")
+def lead_filter_options(current_user: User = Depends(get_current_user), db: Session = Depends(get_db),
+                        source_category: str = "ALL"):
+    category = source_category.strip().upper()
+    if category not in {"ALL", *SOURCE_CATEGORIES}:
+        raise HTTPException(status_code=400, detail="Invalid lead source category.")
+    filters = [] if current_user.role == "ADMIN" else [MainCrmLead.assigned_to_user_id == current_user.id]
+    if category != "ALL": filters.append(MainCrmLead.source_category == category)
+    result = {}
+    for key, column, fallback in (("statuses", MainCrmLead.status_of_lead, "blank"),
+                                  ("sources", MainCrmLead.source, "No source"),
+                                  ("courses", MainCrmLead.course, "No course")):
+        rows = db.execute(select(column, func.count(MainCrmLead.id)).where(*filters).group_by(column)).all()
+        options = {}
+        for value, count in rows:
+            code = value or "__EMPTY__"
+            item = options.setdefault(code, {"value": code, "label": value or fallback, "count": 0})
+            item["count"] += count
+        result[key] = sorted(options.values(), key=lambda item: item["label"].casefold())
+    owners = db.execute(select(MainCrmLead.assigned_to_user_id, User.display_name, func.count(MainCrmLead.id))
+                        .outerjoin(User, User.id == MainCrmLead.assigned_to_user_id).where(*filters)
+                        .group_by(MainCrmLead.assigned_to_user_id, User.display_name)).all()
+    result["counselors"] = sorted([{"value": str(owner_id) if owner_id is not None else "UNASSIGNED",
+                                   "label": name or "Unassigned", "count": count}
+                                  for owner_id, name, count in owners], key=lambda item: item["label"].casefold())
+    return result
 
 
 @router.get("/summary")
@@ -710,6 +761,7 @@ def upload_migration(
             MIGRATION_PROGRESS[batch.unique_number] = {"processed": min(start + MIGRATION_CHUNK_SIZE, len(df)),
                 "rows_total": len(df), "rows_imported": batch.rows_imported, "rows_skipped": batch.rows_skipped}
         batch.status = "COMPLETED"
+        sync_main_counselors(db)
         db.commit()
         return {"unique_number": batch.unique_number, "rows_total": batch.rows_total,
                 "rows_imported": batch.rows_imported, "rows_skipped": batch.rows_skipped, "categories": categories, "skipped_rows": skipped_rows}
@@ -821,6 +873,7 @@ def upload_leads(
                 if progress:
                     progress(processed=processed, rows_imported=imported, rows_skipped=skipped)
         batch.rows_imported = imported; batch.rows_skipped = skipped; batch.status = "COMPLETED"
+        sync_main_counselors(db)
         db.commit()
         return {"unique_number": batch.unique_number, "rows_total": batch.rows_total, "rows_imported": imported, "rows_skipped": skipped, "skipped_rows": skipped_rows}
     except Exception as exc:
@@ -837,6 +890,7 @@ def update_status(lead_id: int, payload: StatusUpdate, current_user: User = Depe
     lead.status_of_lead = payload.status.strip().upper(); lead.updated_at = datetime.now(timezone.utc)
     if old_status != lead.status_of_lead:
         db.add(MainCrmActivity(lead_id=lead.id, activity_type="STATUS_CHANGE", activity_date=datetime.now(timezone.utc).date(), notes=f"Status changed from {old_status} to {lead.status_of_lead}", raw_data={"from": old_status, "to": lead.status_of_lead}))
+    sync_main_counselors(db, [lead.customer_id])
     db.commit(); return {"id": lead.id, "status_of_lead": lead.status_of_lead}
 
 
@@ -861,6 +915,7 @@ def update_details(lead_id: int, payload: LeadEditPayload, current_user: User = 
             notes="Lead information updated",
             raw_data={"changes": changes, "edited_by": {"id": current_user.id, "name": current_user.display_name}},
         ))
+    sync_main_counselors(db, [lead.customer_id])
     db.commit()
     counselor = db.get(User, lead.assigned_to_user_id) if lead.assigned_to_user_id else None
     return lead_dict(lead, counselor)
@@ -873,6 +928,7 @@ def add_note(lead_id: int, payload: LeadNotePayload, current_user: User = Depend
     if not note: raise HTTPException(status_code=400, detail="Note cannot be empty.")
     lead.notes = note; lead.updated_at = datetime.now(timezone.utc)
     db.add(MainCrmActivity(lead_id=lead.id, activity_type="NOTE", activity_date=datetime.now(timezone.utc).date(), notes=note, raw_data={}))
+    sync_main_counselors(db, [lead.customer_id])
     db.commit()
     return {"ok": True, "note": note}
 
@@ -890,4 +946,5 @@ def update_assignment(lead_id: int, payload: AssignmentUpdate, admin: User = Dep
     lead.updated_at = datetime.now(timezone.utc)
     if (old_counselor.id if old_counselor else None) != (counselor.id if counselor else None):
         db.add(MainCrmActivity(lead_id=lead.id, activity_type="ASSIGNMENT", activity_date=datetime.now(timezone.utc).date(), notes=f"Counselor changed to {counselor.display_name if counselor else 'Unassigned'}", raw_data={"from": old_counselor.display_name if old_counselor else None, "to": counselor.display_name if counselor else None}))
+    sync_main_counselors(db, [lead.customer_id])
     db.commit(); return lead_dict(lead, counselor)

@@ -3,7 +3,7 @@ import re
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
-from app.models import Customer, CustomerIdentity, Lead, Learner, LearnersCrmProfile, MainCrmLead
+from app.models import Customer, CustomerIdentity, Lead, Learner, LearnersCrmProfile, MainCrmLead, UpsellContactInfo, UpsellCourseCase
 
 
 def normalize_email(value):
@@ -22,7 +22,16 @@ def _merge_customer(db: Session, source_id: int, target_id: int):
     """A repeated board learner number proves these two contact records are one person."""
     if source_id == target_id:
         return
-    for model in (CustomerIdentity, MainCrmLead, LearnersCrmProfile, Learner, Lead):
+    source_info = db.get(UpsellContactInfo, source_id)
+    target_info = db.get(UpsellContactInfo, target_id)
+    if source_info:
+        if target_info:
+            target_info.overrides = {**source_info.overrides, **target_info.overrides}
+            db.delete(source_info)
+        else:
+            source_info.customer_id = target_id
+        db.flush()
+    for model in (CustomerIdentity, MainCrmLead, LearnersCrmProfile, Learner, Lead, UpsellCourseCase):
         db.execute(update(model).where(model.customer_id == source_id).values(customer_id=target_id))
     source = db.get(Customer, source_id)
     if source:

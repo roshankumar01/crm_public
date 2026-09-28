@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    event,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -167,6 +168,7 @@ class Lead(Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    counselor_from_main: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -272,6 +274,11 @@ class MainCrmActivity(Base):
 
 
 MAIN_CRM_INDEXES = (
+    Index("ix_main_crm_leads_customer_updated_id", MainCrmLead.customer_id, MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()),
+    Index("ix_main_crm_leads_created_id", MainCrmLead.created_at.desc(), MainCrmLead.id.desc()),
+    Index("ix_main_crm_leads_status_updated_id", MainCrmLead.status_of_lead, MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()),
+    Index("ix_main_crm_leads_actual_source_updated_id", MainCrmLead.source, MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()),
+    Index("ix_main_crm_leads_course_updated_id", MainCrmLead.course, MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()),
     Index("ix_main_crm_leads_created_status", MainCrmLead.created_at, MainCrmLead.status_of_lead),
     Index("ix_main_crm_leads_owner_status_course", MainCrmLead.assigned_to_user_id, MainCrmLead.status_of_lead, MainCrmLead.course),
     Index("ix_main_crm_leads_updated_id", MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()),
@@ -303,6 +310,7 @@ class LearnersCrmEnrollment(Base):
     enrolment_id: Mapped[str] = mapped_column(String(100), primary_key=True)
     learner_id: Mapped[int] = mapped_column(ForeignKey("learners_crm_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
     course_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    normalized_course_name: Mapped[str | None] = mapped_column(String(500), nullable=True, index=True)
     enrolment_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     completion_date: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -317,6 +325,13 @@ LEARNERS_CRM_INDEXES = (
     Index("ix_learners_crm_enrollments_learner_date", LearnersCrmEnrollment.learner_id, LearnersCrmEnrollment.enrolment_date.desc()),
     Index("ix_learners_crm_profiles_updated_id", LearnersCrmProfile.updated_at.desc(), LearnersCrmProfile.id.desc()),
 )
+
+
+@event.listens_for(LearnersCrmEnrollment, "before_insert")
+@event.listens_for(LearnersCrmEnrollment, "before_update")
+def normalize_enrollment_course(mapper, connection, enrollment):
+    from app.services.learner_course_mapping import normalize_course_name
+    enrollment.normalized_course_name = normalize_course_name(enrollment.course_name)
 
 
 class LearnerCourseCategory(Base):
@@ -354,3 +369,57 @@ class AppSetting(Base):
 
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[str] = mapped_column(String(500), nullable=False)
+
+
+class UpsellContactInfo(Base):
+    __tablename__ = "upsell_contact_info"
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"), primary_key=True)
+    overrides: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class UpsellInfoEdit(Base):
+    __tablename__ = "upsell_info_edits"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), index=True)
+    raw_data: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class UpsellCourseCase(Base):
+    __tablename__ = "upsell_course_cases"
+    __table_args__ = (
+        UniqueConstraint("lead_id", "current_slot", name="uq_upsell_case_current"),
+        Index("ix_upsell_cases_lead_status", "lead_id", "status"),
+        Index("ix_upsell_cases_status_converted", "status", "converted_at", "id"),
+        Index("ix_upsell_cases_customer_subcategory", "customer_id", "normalized_subcategory"),
+        Index("ix_upsell_cases_customer_status_date", "customer_id", "status", "converted_at", "id"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), index=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id", ondelete="SET NULL"), index=True)
+    mapping_id: Mapped[int | None] = mapped_column(ForeignKey("learner_course_mappings.id", ondelete="SET NULL"))
+    subcategory_id: Mapped[int | None] = mapped_column(ForeignKey("learner_course_subcategories.id", ondelete="SET NULL"))
+    main_category: Mapped[str] = mapped_column(String(255))
+    sub_category: Mapped[str] = mapped_column(String(255))
+    normalized_subcategory: Mapped[str] = mapped_column(String(255))
+    course_name: Mapped[str] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(30), default="NEW", nullable=False)
+    current_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    counselor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    converted_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    converted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class UpsellCourseActivity(Base):
+    __tablename__ = "upsell_course_activities"
+    __table_args__ = (Index("ix_upsell_course_activity_case_created", "case_id", "created_at", "id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("upsell_course_cases.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    activity_type: Mapped[str] = mapped_column(String(40))
+    campaign_name: Mapped[str | None] = mapped_column(String(255))
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    edited_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
