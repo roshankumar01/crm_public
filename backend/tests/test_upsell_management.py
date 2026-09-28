@@ -119,8 +119,8 @@ class UpsellManagementTests(unittest.TestCase):
         self.assertEqual(self.main.status_of_lead, "NEW")
         events = customer_lifecycle(self.db, self.customer.id, self.admin)["events"]
         conversions = [e for e in events if e["key"].startswith("course-conversion")]
-        self.assertEqual(len(conversions), 1)
-        self.assertEqual(conversions[0]["fields"]["sub_category"], "IGC")
+        self.assertEqual(len(conversions), 0)
+        self.assertFalse(any(e["kind"] == "ENROLMENT" for e in events))
 
     def test_mismatch_matches_same_person_and_subcategory_across_course_versions(self):
         first = self.choose(); convert_course(self.lead.id, first, self.owner, self.db)

@@ -9,6 +9,11 @@ _jobs = {}
 _lock = Lock()
 
 
+def has_processing_jobs():
+    with _lock:
+        return any(job["status"] == "PROCESSING" for job in _jobs.values())
+
+
 def create_job(kind, filename, update_target=None):
     with _lock:
         if len(_jobs) >= 1000:

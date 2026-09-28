@@ -3,7 +3,7 @@ import re
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
-from app.models import Customer, CustomerIdentity, Lead, Learner, LearnersCrmProfile, MainCrmLead, UpsellContactInfo, UpsellCourseCase
+from app.models import ConversionVerification, Customer, CustomerIdentity, Lead, Learner, LearnersCrmProfile, MainCrmLead, UpsellContactInfo, UpsellCourseCase
 
 
 def normalize_email(value):
@@ -31,7 +31,7 @@ def _merge_customer(db: Session, source_id: int, target_id: int):
         else:
             source_info.customer_id = target_id
         db.flush()
-    for model in (CustomerIdentity, MainCrmLead, LearnersCrmProfile, Learner, Lead, UpsellCourseCase):
+    for model in (CustomerIdentity, MainCrmLead, LearnersCrmProfile, Learner, Lead, UpsellCourseCase, ConversionVerification):
         db.execute(update(model).where(model.customer_id == source_id).values(customer_id=target_id))
     source = db.get(Customer, source_id)
     if source:

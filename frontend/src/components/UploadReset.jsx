@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { getUploadResetOptions, resetSelectedUploads } from "../api";
+import { getUploadResetOptions, resetSelectedUploads, resetAllCrmData } from "../api";
 
 const TYPE_LABELS = {
   IGC: "Upsell · IGC",
@@ -14,6 +14,8 @@ const TYPE_LABELS = {
 };
 
 export default function UploadReset({ onReset }) {
+  const [mode, setMode] = useState("all");
+  const phrase = mode === "all" ? "RESET ALL CRM DATA" : "DELETE SELECTED UPLOADS";
   const [open, setOpen] = useState(false);
   const [options, setOptions] = useState([]);
   const [selected, setSelected] = useState([]);
@@ -29,6 +31,7 @@ export default function UploadReset({ onReset }) {
     try {
       setOptions(await getUploadResetOptions());
       setSelected([]);
+      setMode("all");
       setConfirmation("");
       setOpen(true);
     } catch (requestError) {
@@ -52,12 +55,12 @@ export default function UploadReset({ onReset }) {
   }
 
   async function removeSelected() {
-    if (!selected.length || confirmation !== "DELETE SELECTED UPLOADS") return;
+    if ((mode === "selected" && !selected.length) || confirmation !== phrase) return;
     setBusy(true);
     setError("");
     try {
-      const result = await resetSelectedUploads(selected);
-      setMessage(`${result.uploads_deleted} upload file${result.uploads_deleted === 1 ? "" : "s"} and linked import rows deleted.`);
+      const result = mode === "all" ? await resetAllCrmData() : await resetSelectedUploads(selected);
+      setMessage(mode === "all" ? "All CRM data cleared. Accounts, course mappings and settings were preserved." : `${result.uploads_deleted} upload file${result.uploads_deleted === 1 ? "" : "s"} and linked import rows deleted.`);
       setOpen(false);
       setSelected([]);
       setConfirmation("");
@@ -70,25 +73,28 @@ export default function UploadReset({ onReset }) {
   }
 
   return <section className="upload-reset-section">
-    <div><div className="eyebrow">DATA RESET</div><h2>Delete uploaded data</h2><p>Select the exact uploaded files to remove. Shared people, manual activity, counselor accounts and course definitions are retained.</p></div>
+    <div><div className="eyebrow">DATA RESET</div><h2>Reset CRM data</h2><p>Clear all CRM data, including manual history, or remove selected uploads. Accounts, course mappings and settings are preserved.</p></div>
     <button type="button" className="upload-reset-open" onClick={showOptions} disabled={busy}>{busy && !open ? "Loading..." : "Data reset"}</button>
     {message && <div className="upload-message">{message}</div>}
     {!open && error && <div className="upload-message">{error}</div>}
     {open && <div className="upload-reset-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) close(); }}>
       <div className="upload-reset-dialog" role="dialog" aria-modal="true" aria-labelledby="upload-reset-title">
-        <h2 id="upload-reset-title">What uploaded data should be deleted?</h2>
-        <p>This permanently deletes the checked upload references and records linked to them. It cannot reconstruct a shared lead’s earlier profile values.</p>
+        <h2 id="upload-reset-title">Reset CRM data</h2>
+        <label>Reset scope<select className="search-input" aria-label="Reset scope" value={mode} disabled={busy} onChange={event=>{setMode(event.target.value);setConfirmation("");}}><option value="all">Total data reset · all CRMs</option><option value="selected">Selected upload files only</option></select></label>
+        <p>{mode === "all" ? "Permanently deletes all leads, contacts, enrolments, results, conversions, notes, edit history, verifications and uploads across every CRM. Accounts and settings are kept." : "Deletes selected imported rows. Shared people and manual history are retained; this is not a total reset."}</p>
+        {mode === "selected" && <>
         {options.length ? <>
           <label className="upload-reset-choice"><input type="checkbox" checked={selected.length === options.length} onChange={event => { setSelected(event.target.checked ? options.map(item => item.id) : []); setConfirmation(""); }} /><strong>Select all upload files ({options.length})</strong></label>
           <div className="upload-reset-options">{options.map(item => <label className="upload-reset-choice" key={item.id}>
             <input type="checkbox" checked={selected.includes(item.id)} onChange={() => toggle(item.id)} />
             <span><strong>{item.filename}</strong><small>{TYPE_LABELS[item.import_type] || item.import_type} · {item.unique_number || `Upload #${item.id}`} · {item.rows_imported} imported · {new Date(item.uploaded_at).toLocaleString()}</small></span>
           </label>)}</div>
-          <p><strong>{selected.length} selected.</strong> Type <code>DELETE SELECTED UPLOADS</code> to confirm.</p>
-          <input className="upload-reset-confirmation" value={confirmation} onChange={event => setConfirmation(event.target.value)} placeholder="DELETE SELECTED UPLOADS" aria-label="Type DELETE SELECTED UPLOADS to confirm" />
-        </> : <p>No uploaded files are available to reset.</p>}
+        </> : <p>No uploaded files are available to reset. Use Total data reset to clear remaining records.</p>}
+        </>}
+        <p>Type <code>{phrase}</code> to confirm.</p>
+        <input className="upload-reset-confirmation" value={confirmation} disabled={busy} onChange={event => setConfirmation(event.target.value)} placeholder={phrase} aria-label={`Type ${phrase} to confirm`} />
         {error && <div className="upload-message">{error}</div>}
-        <div className="upload-reset-actions"><button type="button" onClick={close} disabled={busy}>Cancel</button><button type="button" className="upload-reset-delete" disabled={busy || !selected.length || confirmation !== "DELETE SELECTED UPLOADS"} onClick={removeSelected}>{busy ? "Deleting..." : `Delete ${selected.length} selected`}</button></div>
+        <div className="upload-reset-actions"><button type="button" onClick={close} disabled={busy}>Cancel</button><button type="button" className="upload-reset-delete" disabled={busy || (mode === "selected" && !selected.length) || confirmation !== phrase} onClick={removeSelected}>{busy ? "Deleting..." : mode === "all" ? "Reset all CRM data" : `Delete ${selected.length} selected`}</button></div>
       </div>
     </div>}
   </section>;

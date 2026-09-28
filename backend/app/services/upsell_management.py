@@ -48,6 +48,8 @@ def activity_payload(activity, users):
 
 def cases_payload(db, cases, include_activities=True):
     if not cases: return []
+    from app.services.conversion_verification import verification_payloads
+    checks = verification_payloads(db, UpsellCourseCase, [c.id for c in cases])
     ids = [c.id for c in cases]
     counts = dict(db.execute(select(UpsellCourseActivity.case_id, func.count()).where(UpsellCourseActivity.case_id.in_(ids))
                             .group_by(UpsellCourseActivity.case_id)).all()) if include_activities else {}
@@ -60,7 +62,7 @@ def cases_payload(db, cases, include_activities=True):
     users = dict(db.execute(select(User.id, User.display_name).where(User.id.in_(user_ids))).all()) if user_ids else {}
     grouped = {c.id: [] for c in cases}
     for activity in activities: grouped[activity.case_id].append(activity_payload(activity, users))
-    return [{"id": c.id, "lead_id": c.lead_id, "mapping_id": c.mapping_id, "main_category": c.main_category,
+    return [{**checks[c.id], "id": c.id, "lead_id": c.lead_id, "mapping_id": c.mapping_id, "main_category": c.main_category,
         "sub_category": c.sub_category, "course_name": c.course_name, "status": c.status, "is_current": c.current_slot == 1,
         "converted_at": c.converted_at, "created_at": c.created_at, "counselor": users.get(c.counselor_id),
         "converted_by": users.get(c.converted_by_id), "activity_count": counts.get(c.id, 0), "activities": grouped[c.id]} for c in cases]

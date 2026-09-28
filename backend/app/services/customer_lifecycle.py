@@ -14,15 +14,21 @@ def customer_lifecycle(db: Session, customer_id: int | None, user: User):
     if customer_id is None:
         return {"customer_id": None, "events": []}
 
+    from app.services.verified_enrolments import active_verifications_query
+    from app.services.learner_course_mapping import mapping_for_course_names, normalize_course_name
+    from app.models import ConversionVerification
     events = []
+    enrolled_names = set()
+    enrolments = []
+    result_rows = []
 
-    def add(kind, date, title, detail=None, status=None, href=None, key=None, fields=None, raw_data=None, source_label=None):
+    def add(kind, date, title, detail=None, status=None, href=None, key=None, fields=None, raw_data=None, source_label=None, verified=False):
         events.append({
             "key": key or f"{kind}-{len(events)}", "kind": kind,
             "date": date.isoformat() if date else None,
             "title": title, "detail": detail, "status": status, "href": href,
             "fields": fields or {}, "raw_data": raw_data or {},
-            "source_label": source_label,
+            "source_label": source_label, "verified": verified,
         })
 
     main_query = select(MainCrmLead).where(MainCrmLead.customer_id == customer_id)
@@ -71,7 +77,7 @@ def customer_lifecycle(db: Session, customer_id: int | None, user: User):
             add("ENROLMENT", enrolment.enrolment_date or enrolment.created_at,
                 f"Enrolled in {enrolment.course_name}", detail,
                 enrolment.completion_status, link, f"enrolment-{enrolment.enrolment_id}",
-                fields={"enrolment_id": enrolment.enrolment_id,
+                verified=True, fields={"enrolment_id": enrolment.enrolment_id,
                         "start_date": enrolment.start_date.isoformat() if enrolment.start_date else None,
                         "completion_date": enrolment.completion_date.isoformat() if enrolment.completion_date else None})
             if enrolment.completion_date and (enrolment.completion_status or "").strip().casefold() == "completed":
@@ -126,16 +132,32 @@ def customer_lifecycle(db: Session, customer_id: int | None, user: User):
                 lead.status, f"/upsell/leads/{lead.id}",
                 f"upsell-activity-{activity.id}")
 
-    # Counselor-reported conversions are visible everywhere, separately from uploaded registrations.
-    conversions = db.execute(select(UpsellCourseCase, User.display_name).outerjoin(User, User.id == UpsellCourseCase.counselor_id)
-        .where(UpsellCourseCase.customer_id == customer_id, UpsellCourseCase.status == "CONVERTED")
-        .order_by(UpsellCourseCase.converted_at.desc()).limit(100)).all()
-    for conversion, counselor in conversions:
-        add("UPSELL", conversion.converted_at, f"Course converted: {conversion.course_name}",
-            "Counselor-reported conversion", "CONVERTED", f"/upsell/leads/{conversion.lead_id}",
-            f"course-conversion-{conversion.id}", fields={"main_category": conversion.main_category,
-                "sub_category": conversion.sub_category, "course": conversion.course_name, "counselor": counselor},
-            source_label="Upsell course conversion")
+    # Uploaded evidence already supplies enrolments/results. Manual verification adds
+    # an Enrolled event only, never completion, PASS, or an unverified conversion.
+    course_names = [e.course_name for e in enrolments]
+    mappings = mapping_for_course_names(db, course_names)
+    for e in enrolments:
+        mapped = mappings.get(normalize_course_name(e.course_name)) or {}
+        enrolled_names.add(normalize_course_name(mapped.get("sub_category") or e.course_name))
+    for record, course, _ in result_rows:
+        enrolled_names.add({"IGC": "igc", "ID1": "idip -1", "ID2": "idip -2", "ID3": "idip -3"}.get(course.code, normalize_course_name(course.name)))
+    query = active_verifications_query().where(ConversionVerification.customer_id == customer_id)
+    allowed_main = {lead.id for lead in main_leads}
+    allowed_upsell = {lead.id for lead in opportunities}
+    query = query.add_columns(UpsellCourseCase, User.display_name).outerjoin(UpsellCourseCase, UpsellCourseCase.id == ConversionVerification.upsell_case_id).outerjoin(User, User.id == ConversionVerification.verified_by_id)
+    for verification, item, actor_name in db.execute(query):
+        if not verification.course_name: continue
+        if verification.main_lead_id and verification.main_lead_id not in allowed_main: continue
+        if item and item.lead_id not in allowed_upsell: continue
+        key = verification.normalized_subcategory or normalize_course_name(verification.course_name)
+        if key in enrolled_names: continue
+        enrolled_names.add(key)
+        href = f"/crm/leads/{verification.main_lead_id}" if verification.main_lead_id else f"/upsell/leads/{item.lead_id}"
+        add("ENROLMENT", verification.verified_at, f"Enrolled in {verification.course_name}",
+            "Admin verified enrolment", "Enrolled", href, f"verified-enrolment-{verification.id}",
+            fields={"course": verification.course_name, "sub_category": verification.normalized_subcategory,
+                    "verified_by": actor_name or "Former admin"},
+            source_label="Admin verified enrolment", verified=True)
 
     events.sort(key=lambda item: (item["date"] or "", item["key"]), reverse=True)
     return {"customer_id": customer_id, "events": events}

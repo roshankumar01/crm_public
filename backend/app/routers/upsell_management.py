@@ -12,11 +12,13 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import (Customer, Lead, LearnerCourseCategory, LearnerCourseMapping, LearnerCourseSubcategory,
     MainCrmLead, UpsellContactInfo, UpsellInfoEdit, UpsellCourseCase, UpsellCourseActivity, User)
-from app.services.auth import get_current_user
+from app.services.auth import get_current_user, require_admin
 from app.services.lead_workflow import get_accessible_lead, sync_opportunity_leads
 from app.services.upsell_management import PERSON_FIELDS, contact_info, cases_payload, registration_exists, activity_payload, contact_infos
 from app.services.date_filters import period_condition
 from app.services.learner_course_mapping import normalize_course_name
+
+from app.services.conversion_verification import report_condition, verify_conversion
 
 router = APIRouter(prefix="/upsell/manage", tags=["Upsell course management"])
 
@@ -75,8 +77,8 @@ def catalog(user: User = Depends(get_current_user), db: Session = Depends(get_db
 
 
 @router.get("/mismatch")
-def mismatch(period: str = "all", page: int = Query(1, ge=1), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    conditions = [UpsellCourseCase.status == "CONVERTED", ~registration_exists(), *period_condition(UpsellCourseCase.converted_at, period)]
+def mismatch(period: str = "all", page: int = Query(1, ge=1), user: User = Depends(get_current_user), db: Session = Depends(get_db), state: str = "pending"):
+    conditions = [UpsellCourseCase.status == "CONVERTED", *report_condition(UpsellCourseCase, state), *period_condition(UpsellCourseCase.converted_at, period)]
     if user.role != "ADMIN": conditions.append(Lead.assigned_to_user_id == user.id)
     query = select(UpsellCourseCase).join(Lead, UpsellCourseCase.lead_id == Lead.id).where(*conditions)
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
@@ -91,23 +93,31 @@ def mismatch(period: str = "all", page: int = Query(1, ge=1), user: User = Depen
 
 
 @router.get("/mismatch/export")
-def export_mismatch(period: str = "all", user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    conditions = [UpsellCourseCase.status == "CONVERTED", ~registration_exists(), *period_condition(UpsellCourseCase.converted_at, period)]
+def export_mismatch(period: str = "all", user: User = Depends(get_current_user), db: Session = Depends(get_db), state: str = "pending"):
+    conditions = [UpsellCourseCase.status == "CONVERTED", *report_condition(UpsellCourseCase, state), *period_condition(UpsellCourseCase.converted_at, period)]
     if user.role != "ADMIN": conditions.append(Lead.assigned_to_user_id == user.id)
     rows = db.execute(select(UpsellCourseCase, Customer, User.display_name).join(Lead, UpsellCourseCase.lead_id == Lead.id)
         .outerjoin(Customer, Customer.id == UpsellCourseCase.customer_id).outerjoin(User, User.id == UpsellCourseCase.counselor_id)
         .where(*conditions).order_by(UpsellCourseCase.converted_at.desc())).all()
     people = contact_infos(db, [SimpleNamespace(customer_id=item.customer_id, learner_number=None) for item, _, _ in rows])
-    values = [{"Name": people[item.customer_id if item.customer_id is not None else ("board", None)][0]["full_name"],
+    checks = {item["id"]: item for item in cases_payload(db, [item for item, _, _ in rows], include_activities=False)}
+    values = [{"Verification": checks[item.id]["verification_source"], "Verified By": checks[item.id]["verified_by"], "Verified At": checks[item.id]["verified_at"].isoformat() if checks[item.id]["verified_at"] else None, "Name": people[item.customer_id if item.customer_id is not None else ("board", None)][0]["full_name"],
         "Email": people[item.customer_id if item.customer_id is not None else ("board", None)][0]["email"],
         "Phone": people[item.customer_id if item.customer_id is not None else ("board", None)][0]["phone_number"], "Main Category": item.main_category, "Subcategory": item.sub_category,
         "Course": item.course_name, "Converted Date": item.converted_at.isoformat() if item.converted_at else None,
         "Counselor": owner, "Lead ID": item.lead_id} for item, c, owner in rows]
     output = BytesIO()
-    pd.DataFrame(values, columns=["Name", "Email", "Phone", "Main Category", "Subcategory", "Course", "Converted Date", "Counselor", "Lead ID"]).to_excel(output, index=False)
+    pd.DataFrame(values, columns=["Name", "Email", "Phone", "Main Category", "Subcategory", "Course", "Converted Date", "Counselor", "Lead ID", "Verification", "Verified By", "Verified At"]).to_excel(output, index=False)
     output.seek(0)
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                              headers={"Content-Disposition": 'attachment; filename="upsell-mismatch.xlsx"'})
+
+
+@router.post("/mismatch/{case_id}/verify")
+def verify_upsell_mismatch(case_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    item = db.get(UpsellCourseCase, case_id)
+    if not item: raise HTTPException(404, "Course conversion not found.")
+    return verify_conversion(db, item, admin)
 
 
 @router.get("/{lead_id}")
@@ -128,11 +138,13 @@ def management(lead_id: int, user: User = Depends(get_current_user), db: Session
     converted = db.scalars(converted_query.order_by(UpsellCourseCase.converted_at.desc(), UpsellCourseCase.id.desc()).offset((history_page-1)*20).limit(20)).all()
     main_conversions = db.scalars(select(MainCrmLead).where(MainCrmLead.customer_id == lead.customer_id, MainCrmLead.status_of_lead == "CONVERTED")
         .order_by(MainCrmLead.updated_at.desc()).limit(20)).all() if lead.customer_id else []
+    from app.services.conversion_verification import verification_payloads
+    main_checks = verification_payloads(db, MainCrmLead, [item.id for item in main_conversions])
     return {"info": info, "main_lead_id": main_id,
         "suggestions": [{"lead_id": item.id, "sub_category": item.target_code, "stage": item.stage, "reason": item.reason} for item in suggestions],
         "cases": cases_payload(db, open_cases), "conversions": cases_payload(db, converted), "conversion_total": total,
         "history_page": history_page, "history_pages": max(1, (total+19)//20),
-        "main_conversions": [{"id": item.id, "course": item.course, "updated_at": item.updated_at} for item in main_conversions],
+        "main_conversions": [{**main_checks[item.id], "id": item.id, "course": item.course, "updated_at": item.updated_at} for item in main_conversions],
         "changes": [{"id": edit.id, "raw_data": edit.raw_data, "created_at": edit.created_at} for edit in db.scalars(
             select(UpsellInfoEdit).where(UpsellInfoEdit.lead_id == lead.id).order_by(UpsellInfoEdit.id.desc()).limit(10))]}
 

@@ -121,9 +121,18 @@ def get_tracked_leads(
         ).label("rank")).where(MarketingCampaign.learner_number.in_(learner_numbers)).subquery()
         for campaign in db.scalars(select(MarketingCampaign).join(ranked, MarketingCampaign.id == ranked.c.id).where(ranked.c.rank == 1)):
             latest_campaign[campaign.learner_number] = campaign
+    from app.services.conversion_verification import verification_payloads
+    lead_ids = [lead.id for lead, _, _, _ in rows]
+    ranked_cases = select(UpsellCourseCase.id.label("id"), func.row_number().over(
+        partition_by=UpsellCourseCase.lead_id, order_by=(UpsellCourseCase.converted_at.desc(), UpsellCourseCase.id.desc())).label("rank")
+    ).where(UpsellCourseCase.lead_id.in_(lead_ids), UpsellCourseCase.status == "CONVERTED").subquery()
+    latest_cases = db.scalars(select(UpsellCourseCase).join(ranked_cases, ranked_cases.c.id == UpsellCourseCase.id).where(ranked_cases.c.rank == 1)).all() if lead_ids else []
+    checks = verification_payloads(db, UpsellCourseCase, [c.id for c in latest_cases])
+    checks_by_lead = {c.lead_id: checks[c.id] for c in latest_cases}
     person_info = contact_infos(db, [lead for lead, _, _, _ in rows])
     items = [
         {
+            **checks_by_lead.get(lead.id, {"verified": False}),
             "lead_id": lead.id,
             "customer_id": lead.customer_id,
             "learner_number": lead.learner_number,

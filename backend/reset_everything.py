@@ -18,12 +18,8 @@ def reset_everything():
     db = SessionLocal()
     try:
         db.execute(delete(AuthSession))
-        db.execute(delete(LeadActivity))
-        db.execute(delete(MarketingCampaign))
-        db.execute(delete(Lead))
-        db.execute(delete(LearnerCourseRecord))
-        db.execute(delete(UploadBatch))
-        db.execute(delete(Learner))
+        from app.services.data_reset import clear_crm_data
+        clear_crm_data(db)
         db.execute(delete(Course))
         db.execute(delete(User))
         db.commit()

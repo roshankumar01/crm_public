@@ -7,12 +7,8 @@ from app.models import Lead, LeadActivity, Learner, LearnerCourseRecord, Marketi
 def reset_test_data():
     db = SessionLocal()
     try:
-        db.execute(delete(LeadActivity))
-        db.execute(delete(MarketingCampaign))
-        db.execute(delete(Lead))
-        db.execute(delete(LearnerCourseRecord))
-        db.execute(delete(UploadBatch))
-        db.execute(delete(Learner))
+        from app.services.data_reset import clear_crm_data
+        clear_crm_data(db)
         db.commit()
         print("Test data reset successfully. Courses and CRM users were preserved.")
     except Exception:
@@ -24,7 +20,7 @@ def reset_test_data():
 
 if __name__ == "__main__":
     confirmation = input(
-        "This will DELETE all learners, course history, leads, campaign history and upload history.\n"
+        "This will DELETE all business data across Main, Learners and Upsell CRM, including contacts, history and verifications.\n"
         "CRM users and courses will be preserved.\n"
         "Type RESET to continue: "
     )

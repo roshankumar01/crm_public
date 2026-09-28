@@ -1,6 +1,7 @@
 from collections import defaultdict, namedtuple
 from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
+from types import SimpleNamespace
 
 from fastapi import HTTPException
 from sqlalchemy import select, text
@@ -16,7 +17,7 @@ VALID_ACTIVITY_TYPES = ("EMAIL_CAMPAIGN", "WHATSAPP_CAMPAIGN", "CALL", "NOTE")
 COURSE_REVISION_KEY = "course_records_revision"
 OPPORTUNITY_SYNC_KEY = "opportunity_sync_revision"
 OPPORTUNITY_NEXT_REFRESH_KEY = "opportunity_next_refresh_date"
-OPPORTUNITY_RULES_VERSION = "v4"
+OPPORTUNITY_RULES_VERSION = "v5"
 BoardResult = namedtuple("BoardResult", "learner_number result event_date")
 BoardCourse = namedtuple("BoardCourse", "code")
 
@@ -58,6 +59,17 @@ def sync_opportunity_leads(db: Session):
         enrolments_by_customer[customer_id].append(enrolment)
         course_names.add(enrolment.course_name)
     mappings = mapping_for_course_names(db, course_names)
+
+    from app.services.verified_enrolments import active_verifications_query
+    for verification in db.scalars(active_verifications_query()):
+        if not verification.normalized_subcategory: continue
+        # A virtual name preserves the verified subcategory even if a catalog
+        # course variant is renamed. It cannot be treated as a result or pass.
+        name = f"admin verified enrolment {verification.id}"
+        mappings[name] = {"sub_category": verification.normalized_subcategory}
+        enrolments_by_customer[verification.customer_id].append(SimpleNamespace(
+            course_name=name, enrolment_date=verification.verified_at.date(), created_at=verification.verified_at,
+            completion_status="Not Completed", completion_date=None))
 
     history_by_customer = defaultdict(lambda: defaultdict(list))
     for customer_id, number, result, event_date, code in db.execute(select(

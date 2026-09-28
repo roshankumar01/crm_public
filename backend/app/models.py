@@ -385,6 +385,18 @@ class UpsellInfoEdit(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ConversionVerification(Base):
+    __tablename__ = "conversion_verifications"
+    id = mapped_column(Integer, primary_key=True)
+    main_lead_id = mapped_column(Integer, ForeignKey("main_crm_leads.id", ondelete="CASCADE"), unique=True)
+    upsell_case_id = mapped_column(Integer, ForeignKey("upsell_course_cases.id", ondelete="CASCADE"), unique=True)
+    customer_id = mapped_column(Integer, ForeignKey("customers.id", ondelete="CASCADE"), index=True)
+    verified_by_id = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
+    verified_at = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    course_name = mapped_column(String(500), nullable=True)
+    normalized_subcategory = mapped_column(String(255), nullable=True)
+
+
 class UpsellCourseCase(Base):
     __tablename__ = "upsell_course_cases"
     __table_args__ = (

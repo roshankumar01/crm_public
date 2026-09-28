@@ -10,29 +10,34 @@ if (!process.env.DASHBOARD_CHROMIUM_PATH) throw new Error("Set DASHBOARD_CHROMIU
 const profile = await mkdtemp(path.join(tmpdir(), "gwg-dashboard-test-"));
 const html = `<!doctype html><html><head><title>Upsell course workflow check</title></head><body><div id="root"></div><script type="module">
 import React from 'react';import {createRoot} from 'react-dom/client';import {MemoryRouter,Routes,Route} from 'react-router-dom';
-import {AuthProvider} from '/src/context/AuthContext.jsx';import Lead from '/src/pages/LeadDetailPage.jsx';import Mismatch from '/src/pages/UpsellMismatchPage.jsx';import '/src/index.css';
+import {AuthProvider} from '/src/context/AuthContext.jsx';import Lead from '/src/pages/LeadDetailPage.jsx';import Mismatch from '/src/pages/UpsellMismatchPage.jsx';import MainMismatch from '/src/pages/MainCrmMismatchPage.jsx';import '/src/index.css';
 const owner={assigned_to_user_id:2,assigned_to_name:'Alex Counselor',assignment_source:'MAIN_CRM'};
 const learner={customer_id:1,name:'Main Person',email_id:'main@example.com'};
 const lead={...owner,id:1,customer_id:1,target_code:'IGC',status:'NEW',is_active:true};
 const courses=[{id:1,category_id:1,subcategory_id:1,main_category:'Safety',sub_category:'IGC',course_name:'IGC Version 2'},{id:2,category_id:1,subcategory_id:2,main_category:'Safety',sub_category:'Nebosh PSM',course_name:'Process Safety Management'}];
 let info={full_name:'Main Person',email:'main@example.com'}, cases=[], changes=[], nextActivity=1;
+const mainRows=[{id:7,full_name:'Main Person',email:'main@example.com',course:'IGC',counselor:'Alex Counselor',status_of_lead:'CONVERTED',updated_at:'2026-09-28T12:00:00Z',verified:false}];
+if(location.search.includes('mismatch'))cases=[{...courses[0],id:1,lead_id:1,status:'CONVERTED',activities:[],converted_at:'2026-09-28T12:00:00Z',counselor:'Alex Counselor',verified:false}];
+const report=(items,u)=>{const state=u.searchParams.get('state')||'pending';const filtered=items.filter(c=>state==='all'||(state==='verified'?c.verified:!c.verified));return {items:filtered,page:1,pages:1,total:filtered.length};};
 window.calls=[];window.fetch=async(url,options={})=>{const u=new URL(url,location.origin);const p=u.pathname;const body=options.body?JSON.parse(options.body):{};window.calls.push({path:p,method:options.method||'GET',body});let data;
-if(p==='/auth/me')data={id:1,role:'ADMIN',display_name:'Admin'};
+if(p==='/auth/me')data={id:1,role:location.search.includes('counselor')?'COUNSELOR':'ADMIN',display_name:'Admin'};
 else if(p==='/leads/counselors')data=[{id:2,display_name:'Alex Counselor'}];
 else if(p==='/leads/1')data={lead,learner,activities:[],campaigns:[]};
 else if(p==='/upsell/manage/catalog')data=courses;
 else if(p==='/upsell/manage/1')data={info,main_lead_id:7,suggestions:[{lead_id:1,sub_category:'IGC',stage:2,reason:'Eligible learning pathway'}],cases:cases.filter(c=>c.status!=='CONVERTED'),conversions:cases.filter(c=>c.status==='CONVERTED'),changes,conversion_total:cases.filter(c=>c.status==='CONVERTED').length,history_pages:1,main_conversions:[]};
 else if(p==='/upsell/manage/1/info'){changes.unshift({id:changes.length+1,created_at:'2026-09-28T12:00:00Z',raw_data:{changes:{full_name:{from:info.full_name,to:body.full_name}},edited_by:{name:'Admin'}}});info=body;data={ok:true};}
 else if(p==='/upsell/manage/1/cases'){cases.forEach(c=>c.is_current=false);const c={...courses.find(c=>c.id===body.mapping_id),id:cases.length+1,mapping_id:body.mapping_id,lead_id:1,status:'NEW',activities:[],activity_count:0,is_current:true};cases.push(c);lead.status='NEW';data={case_id:c.id};}
-else if(p==='/upsell/manage/mismatch')data={items:cases.filter(c=>c.status==='CONVERTED').map(c=>({...c,name:info.full_name,email:info.email})),page:1,pages:1,total:cases.filter(c=>c.status==='CONVERTED').length};
+else if(p==='/upsell/manage/mismatch')data=report(cases.filter(c=>c.status==='CONVERTED').map(c=>({...c,name:info.full_name,email:info.email})),u);
+else if(p==='/crm/leads/mismatch')data=report(mainRows,u);
+else if(p==='/upsell/manage/mismatch/1/verify'||p==='/crm/leads/mismatch/7/verify'){const row=p.startsWith('/crm/')?mainRows[0]:cases[0];Object.assign(row,{verified:true,verification_source:'Admin verified enrolment',verified_by:'Admin',verified_at:'2026-09-28T12:00:00Z'});data=row;}
 else {const match=p.match(/cases\\/(\\d+)\\/(activities|convert|status)(?:\\/(\\d+))?/);const c=cases.find(c=>c.id===Number(match?.[1]));if(!c)throw new Error('Unexpected request '+p);
 if(match[2]==='convert'){c.status='CONVERTED';c.is_current=false;c.converted_at='2026-09-28T12:00:00Z';c.counselor='Alex Counselor';c.converted_by='Admin';lead.status='CONVERTED';}
 else if(match[2]==='status'){c.status=body.status;lead.status=body.status;}
 else if(match[3]){const a=c.activities.find(a=>a.id===Number(match[3]));Object.assign(a,body,{edited_by:'Admin'});}
 else {c.activities.unshift({...body,id:nextActivity++,created_at:'2026-09-28T12:00:00Z',user_name:'Admin'});c.activity_count++;}data={ok:true};}
 return {ok:true,json:async()=>structuredClone(data)};};
-const route=location.search.includes('mismatch')?'/upsell/mismatch':'/upsell/leads/1';
-createRoot(document.getElementById('root')).render(React.createElement(MemoryRouter,{initialEntries:[route]},React.createElement(AuthProvider,null,React.createElement(Routes,null,React.createElement(Route,{path:'/upsell/leads/:leadId',element:React.createElement(Lead)}),React.createElement(Route,{path:'/upsell/mismatch',element:React.createElement(Mismatch)})))));
+const route=location.search.includes('main-mismatch')?'/crm/mismatch':location.search.includes('mismatch')?'/upsell/mismatch':'/upsell/leads/1';
+createRoot(document.getElementById('root')).render(React.createElement(MemoryRouter,{initialEntries:[route]},React.createElement(AuthProvider,null,React.createElement(Routes,null,React.createElement(Route,{path:'/upsell/leads/:leadId',element:React.createElement(Lead)}),React.createElement(Route,{path:'/upsell/mismatch',element:React.createElement(Mismatch)}),React.createElement(Route,{path:'/crm/mismatch',element:React.createElement(MainMismatch)})))));
 </script></body></html>`;
 const server = await createServer({ server: { host: "127.0.0.1", port: 5189, strictPort: true }, plugins: [{ name: "dashboard-test-page", configureServer(dev) {
   dev.middlewares.use("/__dashboard_test", async (req, res) => { res.setHeader("Content-Type", "text/html"); res.end(await dev.transformIndexHtml("/__dashboard_test", html)); });
@@ -90,8 +95,28 @@ try {
   const screenshot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:true});
   await mkdir('../outputs',{recursive:true});await writeFile('../outputs/upsell-manage-review.png',Buffer.from(screenshot.data,'base64'));
   await send('Page.navigate',{url:'http://127.0.0.1:5189/__dashboard_test?mismatch'});
-  await waitFor("document.body.textContent.includes('Conversion / registration mismatch') && document.body.textContent.includes('No registration mismatches found.')");
-  console.log('Upsell browser workflow passed: section order, local info edits/history, all three course selectors, contact save/edit, isolated course histories, two conversions, empty next panel and mismatch page.');
+  await waitFor("!!document.querySelector('.verification-tick.pending') && document.body.textContent.includes('Verify enrolment')");
+  await evaluate("Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Verify enrolment').click()");
+  await waitFor("document.body.textContent.includes('Verified as enrolled')");
+  await evaluate("Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Show verified records').click()");
+  await waitFor("!!document.querySelector('.verification-tick.verified')");
+  assert.ok(await evaluate("document.querySelector('.verification-cell').textContent.includes('Admin')"));
+  assert.equal(await evaluate("window.calls.filter(c=>c.method==='POST'&&c.path==='/upsell/manage/mismatch/1/verify').length"),1);
+
+  await waitFor("!!document.querySelector('.verification-tick.verified') && !document.body.textContent.includes('Verify enrolment')");
+  await send('Page.navigate',{url:'http://127.0.0.1:5189/__dashboard_test?main-mismatch'});
+  await waitFor("!!document.querySelector('.verification-tick.pending') && document.body.textContent.includes('Verify enrolment')");
+  await evaluate("Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Verify enrolment').click()");
+  await waitFor("document.body.textContent.includes('Verified as enrolled')");
+  await evaluate("Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Show verified records').click()");
+  await waitFor("!!document.querySelector('.verification-tick.verified')");
+  assert.equal(await evaluate("window.calls.filter(c=>c.method==='POST'&&c.path==='/crm/leads/mismatch/7/verify').length"),1);
+  const verificationScreenshot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:true});
+  await writeFile('../outputs/verification-review.png',Buffer.from(verificationScreenshot.data,'base64'));
+  await send('Page.navigate',{url:'http://127.0.0.1:5189/__dashboard_test?mismatch&counselor'});
+  await waitFor("!!document.querySelector('.verification-tick.pending')");
+  assert.ok(await evaluate("!document.body.textContent.includes('Verify enrolment')"),'Counselors cannot verify');
+  console.log('Upsell browser workflow passed: section order, local info edits/history, all three course selectors, contact save/edit, isolated course histories, two conversions, empty next panel, Main/Upsell verification, green/gray ticks, verified filter and counselor restrictions.');
 } finally {
   socket?.close(); browser.kill(); await server.close();
   await new Promise(resolve => browser.exitCode !== null ? resolve() : browser.once("exit", resolve));

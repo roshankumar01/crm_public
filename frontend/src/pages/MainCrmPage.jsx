@@ -1,3 +1,4 @@
+import VerificationTick from "../components/VerificationTick";
 ﻿import { useEffect, useState } from "react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { assignMainCrmLead, getCounselors, getMainCrmFilterOptions, getMainCrmLeads, getMainCrmSummary, updateMainCrmLeadStatus } from "../api";
@@ -119,7 +120,7 @@ export default function MainCrmPage() {
       <td><div className="learner-cell"><div className="avatar">{lead.full_name?.[0]?.toUpperCase()}</div><div><Link className="profile-name-link" to={`/crm/leads/${lead.id}`} state={{ from: location.pathname + location.search }}>{lead.full_name}</Link><div className="small-muted">{lead.email || "No email"}</div><div className="small-muted">{lead.phone_number || "No phone"}</div></div></div></td>
       <td><strong>{lead.source || "—"}</strong><div className="small-muted">{SOURCES.find(item => item[0] === lead.source_category)?.[1]}</div>{lead.is_migrated && <div className="small-muted">Migrated</div>}</td>
       <td><strong>{lead.course || "—"}</strong><div className="small-muted">{lead.region || "No region"}{lead.age ? ` · Age ${lead.age}` : ""}</div></td>
-      <td><select className="compact-select" value={lead.status_of_lead} disabled={loading || saving === lead.id} onChange={event => changeStatus(lead.id, event.target.value)}>{optionsFor(lead).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td>
+      <td><select className="compact-select" value={lead.status_of_lead} disabled={loading || saving === lead.id} onChange={event => changeStatus(lead.id, event.target.value)}>{optionsFor(lead).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>{lead.status_of_lead==="CONVERTED"&&<VerificationTick record={lead}/>}</td>
       <td>{isAdmin ? <select className="compact-select" value={lead.assigned_to_user_id || ""} disabled={loading || saving === lead.id} onChange={event => changeCounselor(lead.id, event.target.value)}><option value="">Unassigned</option>{counselors.map(counselor => <option key={counselor.id} value={counselor.id}>{counselor.display_name}</option>)}</select> : <strong>{lead.counselor || "Unassigned"}</strong>}<div className="small-muted">{lead.counselor_email || "No counselor email"}</div></td>
       <DateCell value={lead.created_at}/><DateCell value={lead.updated_at}/>
       <td><Link className="text-link" to={`/crm/leads/${lead.id}`} state={{ from: location.pathname + location.search }}>View full profile →</Link>{lead.matched_learner_number && <div className="small-muted">Registered learner #{lead.matched_learner_number}</div>}</td>

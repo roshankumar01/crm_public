@@ -1,5 +1,26 @@
 # Learning CRM — New Chat Handoff
 
+## Complete CRM data reset (September 2026)
+
+- The previous selected-upload reset deliberately retained manual activity and shared contacts, which left two Main CRM leads after uploads were gone. Old inactive Upsell leads/contact identities also remained.
+- Data reset now offers Total data reset (default) or Selected upload files only. Total reset works even with zero uploads, requires the existing admin account and typed `RESET ALL CRM DATA`, and clears all business records across the three CRMs: uploads, leads, contacts/identities, enrolments/results, notes, edits, course cases/activities and verifications. Accounts, sessions, course catalog/mappings and configuration are preserved. Selected mode keeps its original file-specific behavior.
+- `POST /uploads/reset-all` and both reset CLI scripts share `services/data_reset.py`. Records are removed in foreign-key-safe order in one transaction; active uploads block the reset, and recommendation revision invalidation prevents old opportunities from reappearing.
+- At the user's request, local PostgreSQL `upsell_db` was cleared: two Main CRM leads, five Main activities, 10,247 old Upsell leads, 67,892 contacts and 127,167 identities. All CRM business tables and all three overview responses were verified empty/zero. User accounts/sessions/catalog/mappings were verified preserved.
+- Checks: 69 backend tests passed; production frontend build passed; total-reset browser flow passed, including reset with no remaining upload files. Restart the backend for the new endpoint; refresh the browser for cleared values. Full updated files: `outputs/data-reset-fix-files.zip`.
+
+
+## Conversion verification (September 2026)
+
+- Main CRM and Upsell mismatch pages have admin-only Verify enrolment controls, Pending / Verified / All filters, counselor details, 50-row pagination and Excel exports with verification provenance and actor/date.
+- Thick gray ticks identify unverified conversions; green ticks mean an uploaded registration match or explicit admin verification. Ticks also appear on converted pipeline rows, profiles and converted course blocks.
+- Main CRM matches the person only against actual uploaded Learners CRM enrolments or result records. Upsell matches the person plus mapped course subcategory (including alternate variants) or the corresponding board result course. Retained contact shells after reset do not establish registration evidence.
+- Admin verification always means Enrolled, never Completed or PASS. IGC/IDIP passing still requires uploaded evidence. A manual verification stores the person/course snapshot, admin and verification time in `conversion_verifications`; repeated clicks preserve the original audit.
+- Unverified course conversions cannot manufacture enrolment/completion journey events. Verified enrolments appear in the shared journey without writing fake upload rows. Actual uploaded enrolment/result events supersede duplicate virtual enrolments; the admin audit remains. Main person-only matches do not invent enrolment in an unrelated Main lead course.
+- Verified mapped subcategories participate in enrolment/cooling eligibility and prevent repeat recommendations, without unlocking pass-dependent stages. Main course/status edits invalidate the appropriate cached recommendation state. Customer merges preserve verification links.
+- Startup creates the indexed verification table automatically. Restart the backend (or rebuild Docker); no reset or re-upload is required.
+- Verification: 67 backend tests, production frontend build, Main/Upsell browser verification flows and live PostgreSQL report queries pass. Full replacement files are in `outputs/conversion-verification-files.zip`.
+
+
 ## Upsell Manage course workflow (September 2026)
 
 - Manage displays suggestions, personal information, three course selectors (main category/subcategory/course), course status/contact history, converted course blocks and the expandable edit history at the bottom.

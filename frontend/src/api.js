@@ -142,12 +142,12 @@ const companyDashboardQuery = (range = {}) => {
 export const getCompanyDashboard = (section, range) => request(`/company-dashboard/${section}?${companyDashboardQuery(range)}`);
 export const getCompanySalesCourses = (counselorId, range) => request(`/company-dashboard/sales/courses?${companyDashboardQuery(range)}${counselorId == null ? "" : `&counselor_id=${encodeURIComponent(counselorId)}`}`);
 export const getCompanySalesSources = (counselorId, course, range) => request(`/company-dashboard/sales/sources?${companyDashboardQuery(range)}&course=${encodeURIComponent(course)}${counselorId == null ? "" : `&counselor_id=${encodeURIComponent(counselorId)}`}`);
-export const getMainCrmMismatch = (period = "all") => request(`/crm/leads/mismatch?period=${encodeURIComponent(period)}`);
+export const getMainCrmMismatch = (period = "all",page=1,state="pending") => request(`/crm/leads/mismatch?period=${encodeURIComponent(period)}&page=${page}&state=${encodeURIComponent(state)}`);
 export async function downloadCrmExport(path, filename) { const response = await fetch(`${API_URL}${path}`, { headers: { Authorization: `Bearer ${getStoredToken()}` } }); if (!response.ok) throw new Error(await response.text()); const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = filename; link.click(); URL.revokeObjectURL(url); }
 export const downloadMainCrmExport = period => downloadCrmExport(`/crm/leads/export?period=${encodeURIComponent(period)}`, "main-crm-export.xlsx");
 export const downloadLearnersCrmExport = period => downloadCrmExport(`/learners-crm/export?period=${encodeURIComponent(period)}`, "learners-crm-export.xlsx");
 export const downloadUpsellCrmExport = period => downloadCrmExport(`/analytics/leads/export?period=${encodeURIComponent(period)}`, "upsell-crm-export.xlsx");
-export const downloadMainCrmMismatch = period => downloadCrmExport(`/crm/leads/mismatch/export?period=${encodeURIComponent(period)}`, "converted-mismatches.xlsx");
+export const downloadMainCrmMismatch = (period,state="pending") => downloadCrmExport(`/crm/leads/mismatch/export?period=${encodeURIComponent(period)}&state=${encodeURIComponent(state)}`, "converted-mismatches.xlsx");
 export const getMainCrmLead = leadId => request(`/crm/leads/detail/${leadId}`);
 export const updateMainCrmLeadDetails = (leadId, payload) => request(`/crm/leads/${leadId}/details`, { method: "PATCH", body: JSON.stringify(payload) });
 export const addMainCrmLeadNote = (leadId, note) => request(`/crm/leads/${leadId}/notes`, { method: "POST", body: JSON.stringify({ note }) });
@@ -224,7 +224,12 @@ export const setUpsellCourseStatus = (id, caseId, status) => request(`/upsell/ma
 export const saveUpsellCourseActivity = (id, caseId, payload) => request(`/upsell/manage/${id}/cases/${caseId}/activities`, {method:"POST",body:JSON.stringify(payload)});
 export const editUpsellCourseActivity = (id, caseId, activityId, payload) => request(`/upsell/manage/${id}/cases/${caseId}/activities/${activityId}`, {method:"PATCH",body:JSON.stringify(payload)});
 export const convertUpsellCourse = (id, caseId) => request(`/upsell/manage/${id}/cases/${caseId}/convert`, {method:"POST"});
-export const getUpsellMismatch = (period="all",page=1) => request(`/upsell/manage/mismatch?period=${encodeURIComponent(period)}&page=${page}`);
-export const downloadUpsellMismatch = period => downloadCrmExport(`/upsell/manage/mismatch/export?period=${encodeURIComponent(period)}`,"upsell-mismatch.xlsx");
+export const getUpsellMismatch = (period="all",page=1,state="pending") => request(`/upsell/manage/mismatch?period=${encodeURIComponent(period)}&page=${page}&state=${encodeURIComponent(state)}`);
+export const downloadUpsellMismatch = (period,state="pending") => downloadCrmExport(`/upsell/manage/mismatch/export?period=${encodeURIComponent(period)}&state=${encodeURIComponent(state)}`,"upsell-mismatch.xlsx");
 
 export const getUpsellContactHistory = (id,caseId,page=1) => request(`/upsell/manage/${id}/history/${caseId}?page=${page}`);
+
+export const verifyMainCrmMismatch = id => request(`/crm/leads/mismatch/${id}/verify`, {method:"POST"});
+export const verifyUpsellMismatch = id => request(`/upsell/manage/mismatch/${id}/verify`, {method:"POST"});
+
+export const resetAllCrmData = () => request("/uploads/reset-all", {method:"POST",body:JSON.stringify({confirmation:"RESET ALL CRM DATA"})});

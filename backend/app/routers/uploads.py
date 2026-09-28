@@ -130,6 +130,27 @@ class ResetUploadsRequest(BaseModel):
     confirmation: str
 
 
+class ResetAllDataRequest(BaseModel):
+    confirmation: str
+
+
+@router.post("/reset-all")
+def reset_all_data(payload: ResetAllDataRequest, admin_user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    if admin_user.role != "ADMIN": raise HTTPException(403, "Admin access required.")
+    if payload.confirmation != "RESET ALL CRM DATA": raise HTTPException(400, "Type RESET ALL CRM DATA to confirm.")
+    from app.services.upload_jobs import has_processing_jobs
+    if has_processing_jobs(): raise HTTPException(409, "An upload is still processing. Wait for it to finish before resetting data.")
+    from app.services.data_reset import clear_crm_data
+    try:
+        counts = clear_crm_data(db)
+        db.commit()
+        sync_opportunity_leads(db)
+    except Exception:
+        db.rollback()
+        raise
+    return {"rows_deleted": counts, "uploads_deleted": counts["upload_batches"], "all_data_reset": True}
+
+
 @router.get("/reset-options")
 def reset_options(admin_user: User = Depends(require_admin), db: Session = Depends(get_db)):
     batches = db.execute(select(UploadBatch).order_by(UploadBatch.uploaded_at.desc(), UploadBatch.id.desc())).scalars().all()

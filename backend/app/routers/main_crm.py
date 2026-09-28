@@ -22,6 +22,8 @@ from app.services.counselor_sync import sync_main_counselors
 from app.services.importers.common import clean, dataframe_row_to_dict, parse_date, read_upload, require_columns, upload_rows, UPLOAD_CHUNK_SIZE
 from app.services.date_filters import period_condition
 
+from app.services.conversion_verification import verification_payloads, report_condition, verify_conversion
+
 router = APIRouter(prefix="/crm/leads", tags=["Main CRM"])
 
 SOURCE_CATEGORIES = {"INFO_EMAIL_LEADS", "LIVE_ONLINE_LEADS", "DIRECT_CALLS", "CAMPAIGN_REPLIES", "CAMPAIGN_DATA"}
@@ -296,7 +298,8 @@ def list_leads(
     tie_breaker = MainCrmLead.id.asc() if sort_direction == "asc" else MainCrmLead.id.desc()
     rows = db.execute(query.order_by(order, tie_breaker)
                       .limit(page_size).offset((page - 1) * page_size)).all()
-    return {"items": [lead_dict(lead, counselor, is_migrated) for lead, counselor, is_migrated in rows],
+    checks = verification_payloads(db, MainCrmLead, [lead.id for lead, _, _ in rows])
+    return {"items": [dict(lead_dict(lead, counselor, is_migrated), **checks[lead.id]) for lead, counselor, is_migrated in rows],
             "total": total, "page": page, "page_size": page_size,
             "pages": max(1, (total + page_size - 1) // page_size)}
 
@@ -378,32 +381,40 @@ def lead_summary(current_user: User = Depends(get_current_user), db: Session = D
             "source_breakdown": source_breakdown}
 
 
-def _mismatch_rows(db, current_user, period="all"):
-    registered_ids = set(db.execute(select(Learner.customer_id).where(Learner.customer_id.is_not(None))).scalars())
-    registered_ids.update(db.execute(select(LearnersCrmProfile.customer_id).where(LearnersCrmProfile.customer_id.is_not(None))).scalars())
-    filters = [MainCrmLead.status_of_lead == "CONVERTED", *period_condition(MainCrmLead.created_at, period)]
-    if current_user.role != "ADMIN":
-        filters.append(MainCrmLead.assigned_to_user_id == current_user.id)
-    leads = db.scalars(select(MainCrmLead).where(*filters).order_by(MainCrmLead.updated_at.desc(), MainCrmLead.id.desc())).all()
-    return [lead for lead in leads if lead.customer_id not in registered_ids]
+def _mismatch_query(current_user, period="all", state="pending"):
+    filters = [MainCrmLead.status_of_lead == "CONVERTED", *period_condition(MainCrmLead.created_at, period), *report_condition(MainCrmLead, state)]
+    if current_user.role != "ADMIN": filters.append(MainCrmLead.assigned_to_user_id == current_user.id)
+    return select(MainCrmLead, User).outerjoin(User, User.id == MainCrmLead.assigned_to_user_id).where(*filters)
 
 
 @router.get("/mismatch")
-def converted_mismatch(period: str = "all", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    leads = _mismatch_rows(db, current_user, period)
-    return {"total": len(leads), "items": [lead_dict(lead, db.get(User, lead.assigned_to_user_id), False) for lead in leads]}
+def converted_mismatch(period: str = "all", current_user: User = Depends(get_current_user), db: Session = Depends(get_db), page: int = 1, state: str = "pending"):
+    if page < 1: raise HTTPException(400, "Invalid page.")
+    query = _mismatch_query(current_user, period, state)
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    rows = db.execute(query.order_by(MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()).offset((page-1)*50).limit(50)).all()
+    checks = verification_payloads(db, MainCrmLead, [lead.id for lead, _ in rows])
+    return {"total": total, "page": page, "pages": max(1, (total+49)//50), "items": [dict(lead_dict(lead, owner), **checks[lead.id]) for lead, owner in rows]}
+
+
+@router.post("/mismatch/{lead_id}/verify")
+def verify_main_mismatch(lead_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    lead = db.get(MainCrmLead, lead_id)
+    if not lead: raise HTTPException(404, "Lead not found.")
+    return verify_conversion(db, lead, admin)
 
 
 @router.get("/mismatch/export")
-def export_converted_mismatch(period: str = "all", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    leads = _mismatch_rows(db, current_user, period)
+def export_converted_mismatch(period: str = "all", current_user: User = Depends(get_current_user), db: Session = Depends(get_db), state: str = "pending"):
+    leads = db.execute(_mismatch_query(current_user, period, state).order_by(MainCrmLead.updated_at.desc(), MainCrmLead.id.desc())).all()
+    checks = verification_payloads(db, MainCrmLead, [lead.id for lead, _ in leads])
     rows = [{"Lead ID": lead.id, "Name": lead.full_name, "Email": lead.email, "Phone": lead.phone_number,
              "Course": lead.course, "Source": lead.source, "Status": lead.status_of_lead,
-             "Counselor": (db.get(User, lead.assigned_to_user_id).display_name if lead.assigned_to_user_id and db.get(User, lead.assigned_to_user_id) else "Unassigned"),
-             "Created At": lead.created_at, "Updated At": lead.updated_at} for lead in leads]
+             "Counselor": owner.display_name if owner else "Unassigned", "Verification": checks[lead.id]["verification_source"],
+             "Verified By": checks[lead.id]["verified_by"], "Verified At": checks[lead.id]["verified_at"].isoformat() if checks[lead.id]["verified_at"] else None,
+             "Created At": lead.created_at.isoformat() if lead.created_at else None, "Updated At": lead.updated_at.isoformat() if lead.updated_at else None} for lead, owner in leads]
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        pd.DataFrame(rows).to_excel(writer, sheet_name="Mismatches", index=False)
+    pd.DataFrame(rows).to_excel(output, index=False)
     output.seek(0)
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="converted-mismatches.xlsx"'})
 
@@ -456,7 +467,7 @@ def get_main_crm_lead(lead_id: int, current_user: User = Depends(get_current_use
         MainCrmActivity.activity_date.desc(), MainCrmActivity.id.desc()
     )).scalars().all()
     migrated = any(item.activity_type == "MIGRATION" for item in activities)
-    profile = lead_dict(lead, counselor, migrated)
+    profile = dict(lead_dict(lead, counselor, migrated), **verification_payloads(db, MainCrmLead, [lead.id])[lead.id])
     if migrated:
         source_dates = []
         for item in activities:
@@ -889,6 +900,10 @@ def update_status(lead_id: int, payload: StatusUpdate, current_user: User = Depe
     old_status = lead.status_of_lead
     lead.status_of_lead = payload.status.strip().upper(); lead.updated_at = datetime.now(timezone.utc)
     if old_status != lead.status_of_lead:
+        from app.models import ConversionVerification
+        if db.scalar(select(ConversionVerification.id).where(ConversionVerification.main_lead_id == lead.id)):
+            from app.services.lead_workflow import mark_opportunities_dirty
+            mark_opportunities_dirty(db)
         db.add(MainCrmActivity(lead_id=lead.id, activity_type="STATUS_CHANGE", activity_date=datetime.now(timezone.utc).date(), notes=f"Status changed from {old_status} to {lead.status_of_lead}", raw_data={"from": old_status, "to": lead.status_of_lead}))
     sync_main_counselors(db, [lead.customer_id])
     db.commit(); return {"id": lead.id, "status_of_lead": lead.status_of_lead}
@@ -909,6 +924,11 @@ def update_details(lead_id: int, payload: LeadEditPayload, current_user: User = 
             if field == "email": lead.normalized_email = normalize_email(value)
             if field == "phone_number": lead.normalized_phone = normalize_phone(value)
     if changes:
+        if "course" in changes:
+            from app.models import ConversionVerification
+            if db.scalar(select(ConversionVerification.id).where(ConversionVerification.main_lead_id == lead.id)):
+                from app.services.lead_workflow import mark_opportunities_dirty
+                mark_opportunities_dirty(db)
         lead.updated_at = datetime.now(timezone.utc)
         db.add(MainCrmActivity(
             lead_id=lead.id, activity_type="EDIT", activity_date=datetime.now(timezone.utc).date(),
