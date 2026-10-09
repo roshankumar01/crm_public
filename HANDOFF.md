@@ -1,5 +1,52 @@
 # Learning CRM — New Chat Handoff
 
+## Daily learner uploads and verification (October 2026)
+
+- The existing Learners CRM upload is labeled **Learners migrated**. A separate **Daily learners** upload accepts `enrolment_id`, `learner_name`, `email`, `phone`, `course`, `created_date`, `enrolment_date`, `start_date`, and `counselor_name` (headers are normalized). Each row needs an ID, learner name, course, enrolment date, and email or phone.
+- Daily rows are staged in `daily_learner_rows`. A row with a Main CRM email/phone match and a uniquely matched active counselor is verified automatically and becomes an enrolment. Other rows remain pending and cannot create Upsell opportunities until an admin corrects email/phone and counselor, then clicks Verify on the Learners CRM Verification page. Explicit admin verification can approve a learner even if no Main CRM lead matches.
+- Daily enrolments retain the file counselor (`learners_crm_enrollments.counselor_user_id`); Upsell opportunities inherit that counselor ahead of the Main CRM assignment. Learner profiles display that ownership. Matching migrated enrolments show green ticks; unmatched migrated enrolments show red ticks and still contribute to Upsell. Pending daily rows show gray ticks on the verification page.
+- The new upload uses the existing progress job and skipped-row download. Both full and selected data reset remove staged daily rows. Startup adds the counselor columns and creates the staging table/indexes. Restart the backend to apply schema changes; no data reset is required.
+- Verified with 95 backend tests, including daily matching, pending/admin verification, migrated match status and Upsell counselor ownership, plus the frontend production build. Full replacement files: `outputs/daily-learners-verification-files.zip`.
+
+## Unique counselor updates (October 2026)
+
+- The Counselors dashboard now separates raw action totals from unique people updated within the selected date range. Identity uses the shared `customer_id` across Main and Upsell; an unlinked record falls back to its workspace lead ID. Team card unique counts deduplicate across counselors and both CRMs. Each counselor chart value deduplicates that counselor's updates; Main and Upsell unique breakdowns may overlap for someone contacted in both workspaces.
+- The Overview cards show unique people alongside total/Main/Upsell update counts. The chart has Every update / Unique people counting controls plus its existing Overview, Leads given, Main CRM and Upsell views. Unique Overview uses one bar for the deduplicated total so overlapping CRM counts are not stacked as if additive.
+- The Change log has All updates / Unique people filters. Unique mode shows the latest action per linked person with the count of that counselor's actions for that person; View all updates opens that person's complete filtered history. Date range and counselor filters still apply, with SQL pagination.
+- Counts and deduplication are calculated in SQL with existing lead/action indexes; no audit records were rewritten. Verified with 91 backend tests, frontend production build, counselor dashboard browser test, and live PostgreSQL summary/log queries. Full replacement files: `outputs/unique-counselor-updates-files.zip`.
+
+## Fix for Failed to fetch on status and notes (October 2026)
+
+- Main CRM status changes and manual notes failed because an existing `counselor_actions` table was created before the `actor_name` and `assigned_counselor_name` columns were added to the model. ORM writes raised PostgreSQL `UndefinedColumn`, which surfaced as "Failed to fetch" in the browser.
+- Startup now idempotently adds both missing columns to existing databases and backfills actor/counselor names for retained audit rows. The local PostgreSQL schema was upgraded. Fresh databases already get the full schema from `create_all`.
+- The Main lead profile keeps its content visible after a write error and shows the error inline, so a failed note/status save can be retried. Successful attempts clear the error.
+- Verified Main note and status writes, and Upsell note and status writes, against real PostgreSQL leads inside rollback-only transactions; no diagnostic changes remained. 90 backend tests, production frontend build and Main profile render check pass. Full replacement files: `outputs/status-note-fetch-fix-files.zip`.
+
+## Counselor dashboard (October 2026)
+
+- Admin-only Dashboard workspace now has `/dashboard/counselors` Overview and `/dashboard/counselors/changes` Change log. No separate sales-head account role was added. Cards show Main CRM leads given, total counselor-authored updates, and the Main/Upsell split. The vertical comparison includes every counselor, even those with zero actions, with Overview, leads, Main, and Upsell views. Clicking a counselor opens their log.
+- Lead counts use the current Main CRM assignee and the date of the latest assignment. Main leads now store indexed `assigned_at`; manual reassignment and uploads set it. Migration uses old CRM `Last assigned at` when available, then its lead creation date. Existing assigned records with no stored assignment timestamp are backfilled with lead creation time on startup. Historical prior reassignment events cannot be reconstructed, so these are current-assignment counts, not an all-time transfer ledger.
+- Update counts use the indexed append-only `counselor_actions` table and credit the actual counselor who saved the note/status/contact action, excluding admin edits. The log is admin-only, filters to one counselor and the chosen India-calendar date range, and paginates 50 rows. It shows actor, lead, course, status transition, previous/new note, and flags notes of 1–3 characters. Upsell status/conversion actions now retain the previous note in the audit fact too.
+- Date controls provide Today, Yesterday, Last 7 days, Last 1 month, custom range, and All time. Both pages retain the selected range in the browser session. SQL groups counts without loading all leads/actions; the log uses indexed actor/time lookup.
+- Restart backend for the `assigned_at` migration/index and refresh frontend. No CRM data reset is needed. Checks: 89 backend tests, production frontend build, counselor dashboard browser interaction test and visual review, and live PostgreSQL schema/route inspection. Full replacement contents: `outputs/counselor-dashboard-files.zip`.
+
+## Counselor activity facts and status notes (October 2026)
+
+- No sales head dashboard has been built yet. Main and Upsell CRM now collect indexed, append-only `counselor_actions` facts for future counselor performance reporting. Each fact records action time, acting account and name, assigned counselor and name at that time, workspace lead/course, source where available, status before/after, note before/after and contact channel. These facts are kept separately from the learning journey and personal edit history.
+- Manual status changes in both pipelines, the Main lead profile, the Upsell course panel and Upsell course conversion require a fresh, nonblank contact note. Changing a dropdown alone does not save. The API checks the note too, rejects an unchanged latest note and writes the status, conversation activity and audit fact in one transaction. Repeating the same status or already completed conversion does not create a fake activity fact. Upload-driven status updates remain automatic.
+- Main CRM note additions and Upsell contact saves/edits also append audit facts with actor and note changes. The original contact history remains visible. Total data reset clears these new facts while keeping user accounts. Existing historical actions cannot have their actors reconstructed; new actions are tracked from this release onward.
+- Restart the backend to create the table and refresh the frontend. No reset or re-upload is needed. Checks: 85 backend tests, production frontend build, Main pipeline and Upsell Manage browser workflows, and live PostgreSQL table/index inspection passed. Full replacement files: `outputs/sales-activity-tracking-files.zip`.
+
+## Counselor reminders (September 2026)
+
+- Both Main CRM and Upsell have separate Reminders pages (`/crm/reminders`, `/upsell/reminders`) and Set reminder controls in every pipeline row and lead profile. Counselors choose N calendar days (including Today), optionally add a contact note, mark done or reschedule. There is one current reminder per lead per workspace; rescheduling reopens a completed reminder.
+- Reminders follow the lead's current assigned counselor. Counselors can only list/read/change reminders for their assigned leads. Admins can view/filter all counselors and schedule reminders; an unassigned lead's reminder is attributed to the admin who created it.
+- Countdown uses India company dates. Zero days means Contact today; past dates remain highlighted with overdue days until marked done or rescheduled. The page has Due / Upcoming / Done counts and filters, profile links and stable 50-row pagination. An open tracker refreshes at the company-day change, without per-lead polling or daily database writes. Pipeline controls fetch reminder details only when opened.
+- New indexed `lead_reminders` table and `/reminders` API are created/registered on startup. Reminder actions are separate from lead status, personal edit history and learning journey. Deleting a lead cascades to its reminder; Total data reset and both reset CLI scripts also clear reminders.
+- Checks: 78 backend tests passed; Main/Upsell reminder browser flows, the existing Upsell manage/verification browser flow, production build and live PostgreSQL reminder queries passed. The database remains empty after the previous reset; tests did not insert real leads or reminders.
+- Restart the backend and refresh the frontend; no data reset or re-upload is needed. Full replacement contents: `outputs/counselor-reminder-files.zip`.
+
+
 ## Complete CRM data reset (September 2026)
 
 - The previous selected-upload reset deliberately retained manual activity and shared contacts, which left two Main CRM leads after uploads were gone. Old inactive Upsell leads/contact identities also remained.

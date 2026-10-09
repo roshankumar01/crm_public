@@ -1,13 +1,13 @@
 """Clear business data across every workspace, preserving accounts and configuration."""
 from fastapi import HTTPException
 from sqlalchemy import delete, select
-from app.models import (ConversionVerification, UpsellCourseActivity, UpsellCourseCase,
+from app.models import (DailyLearnerRow, CounselorAction, LeadReminder, ConversionVerification, UpsellCourseActivity, UpsellCourseCase,
     UpsellInfoEdit, UpsellContactInfo, LeadActivity, MarketingCampaign, MainCrmActivity,
-    MainCrmLead, Lead, LearnerCourseRecord, LearnersCrmEnrollment, LearnersCrmProfile,
+    MainCrmLead, Lead, LearnerCourseRecord, LearnersCrmEnrollment, DailyLearnerRow, LearnersCrmProfile,
     Learner, CustomerIdentity, Customer, UploadBatch)
 from app.services.lead_workflow import mark_opportunities_dirty
 
-DATA_MODELS = (ConversionVerification, UpsellCourseActivity, UpsellCourseCase,
+DATA_MODELS = (CounselorAction, LeadReminder, ConversionVerification, UpsellCourseActivity, UpsellCourseCase,
     UpsellInfoEdit, UpsellContactInfo, LeadActivity, MarketingCampaign, MainCrmActivity,
     MainCrmLead, Lead, LearnerCourseRecord, LearnersCrmEnrollment, LearnersCrmProfile,
     Learner, CustomerIdentity, Customer, UploadBatch)

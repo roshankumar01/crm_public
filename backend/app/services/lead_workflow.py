@@ -178,7 +178,8 @@ def get_accessible_lead(db: Session, lead_id: int, current_user: User) -> Lead:
     return lead
 
 
-def change_lead_status(db: Session, lead: Lead, status: str, user: User):
+def change_lead_status(db: Session, lead: Lead, status: str, user: User, note: str | None = None):
+    from app.services.counselor_activity import record_action, new_contact_note, latest_contact_note
     normalized = status.strip().upper()
     if normalized not in VALID_LEAD_STATUSES:
         raise HTTPException(
@@ -186,10 +187,14 @@ def change_lead_status(db: Session, lead: Lead, status: str, user: User):
             detail=f"Status must be one of: {', '.join(VALID_LEAD_STATUSES)}.",
         )
 
+    db.execute(select(Lead.id).where(Lead.id == lead.id).with_for_update())
+    db.refresh(lead)
     previous = lead.status
     if previous == normalized:
         return lead
 
+    note = new_contact_note(db, note, lead=lead)
+    previous_note = latest_contact_note(db, lead=lead)
     lead.status = normalized
     lead.status_updated_at = datetime.now(timezone.utc)
     db.add(
@@ -198,9 +203,11 @@ def change_lead_status(db: Session, lead: Lead, status: str, user: User):
             user_id=user.id,
             activity_type="STATUS_CHANGE",
             channel="SYSTEM",
-            notes=f"Status changed from {previous} to {normalized}.",
+            notes=f"Status changed from {previous} to {normalized}. Contact note: {note}",
         )
     )
+    record_action(db, user=user, lead=lead, action_type="STATUS_CHANGE",
+        before_status=previous, after_status=normalized, before_note=previous_note, after_note=note)
     db.commit()
     db.refresh(lead)
     return lead
@@ -219,6 +226,7 @@ def assign_lead(db: Session, lead: Lead, counselor_user_id: int | None, admin_us
 
     lead.assigned_to_user_id = counselor_user_id
     lead.counselor_from_main = False
+    lead.counselor_from_daily = False
     lead.assigned_at = datetime.now(timezone.utc) if counselor_user_id is not None else None
     new_name = counselor.display_name if counselor else "Unassigned"
     db.add(
@@ -268,6 +276,10 @@ def add_lead_activity(
         notes=(notes or "").strip() or None,
     )
     db.add(activity)
+    from app.services.counselor_activity import record_action, latest_contact_note
+    previous_note = latest_contact_note(db, lead=lead)
+    record_action(db, user=user, lead=lead, action_type="NOTE" if normalized == "NOTE" else "CONTACT",
+        before_note=previous_note, after_note=activity.notes, channel=channel_map[normalized])
     db.commit()
     db.refresh(activity)
     return activity

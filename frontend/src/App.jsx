@@ -1,4 +1,5 @@
 import { BrowserRouter, Navigate, Outlet, Route, Routes } from "react-router-dom";
+import RemindersPage from "./pages/RemindersPage.jsx";
 import AppLayout from "./components/AppLayout.jsx";
 import { AuthProvider, useAuth } from "./context/AuthContext.jsx";
 import DashboardPage from "./pages/DashboardPage.jsx";
@@ -20,8 +21,10 @@ import MainCrmLeadDetailPage from "./pages/MainCrmLeadDetailPage.jsx";
 import LearnersCrmOverviewPage from "./pages/LearnersCrmOverviewPage.jsx";
 import LearnersCrmSearchPage from "./pages/LearnersCrmSearchPage.jsx";
 import LearnersCrmDetailPage from "./pages/LearnersCrmDetailPage.jsx";
+import LearnersCrmVerificationPage from "./pages/LearnersCrmVerificationPage.jsx";
 import DataUploadsPage from "./pages/DataUploadsPage.jsx";
 import CompanyDashboardPage from "./pages/CompanyDashboardPage.jsx";
+import CounselorDashboardPage from "./pages/CounselorDashboardPage.jsx";
 
 function RequireAuth() {
   const { user, loading } = useAuth();
@@ -47,7 +50,11 @@ export default function App() {
                 <Route path="/dashboard" element={<CompanyDashboardPage section="overview" />} />
                 <Route path="/dashboard/sales" element={<CompanyDashboardPage section="sales" />} />
                 <Route path="/dashboard/dinesh" element={<CompanyDashboardPage section="dinesh" />} />
+                <Route path="/dashboard/counselors" element={<CounselorDashboardPage section="overview" />} />
+                <Route path="/dashboard/counselors/changes" element={<CounselorDashboardPage section="changes" />} />
               </Route>
+              <Route path="/crm/reminders" element={<RemindersPage workspace="main" />} />
+              <Route path="/upsell/reminders" element={<RemindersPage workspace="upsell" />} />
               <Route path="/crm/leads" element={<MainCrmPage />} />
               <Route path="/crm/leads/:leadId" element={<MainCrmLeadDetailPage />} />
               <Route path="/crm/analytics" element={<MainCrmAnalyticsPage />} />
@@ -78,6 +85,7 @@ export default function App() {
                 <Route path="learners" element={<LearnersCrmSearchPage />} />
                 <Route path="learners/:learnerId" element={<LearnersCrmDetailPage />} />
                 <Route element={<RequireAdmin />}>
+                  <Route path="verification" element={<LearnersCrmVerificationPage />} />
                   <Route path="uploads" element={<Navigate to="/crm/uploads?section=learners" replace />} />
                 </Route>
               </Route>

@@ -3,7 +3,7 @@ from io import BytesIO
 from types import SimpleNamespace
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, or_, select, update
@@ -19,6 +19,7 @@ from app.services.date_filters import period_condition
 from app.services.learner_course_mapping import normalize_course_name
 
 from app.services.conversion_verification import report_condition, verify_conversion
+from app.services.counselor_activity import record_action, new_contact_note, latest_contact_note
 
 router = APIRouter(prefix="/upsell/manage", tags=["Upsell course management"])
 
@@ -39,6 +40,11 @@ class CourseChoice(BaseModel):
 
 class CaseStatus(BaseModel):
     status: str
+    note: str | None = None
+
+
+class ConversionInput(BaseModel):
+    note: str | None = None
 
 
 class ActivityInput(BaseModel):
@@ -206,32 +212,54 @@ def case_status(lead_id: int, case_id: int, payload: CaseStatus, user: User = De
     status = payload.status.upper().strip()
     if status not in {"NEW", "IN_CONTACT", "REJECTED"}: raise HTTPException(400, "Use Update converted to record a course conversion.")
     if item.status != status:
-        db.add(UpsellCourseActivity(case_id=item.id, user_id=user.id, activity_type="STATUS_CHANGE", notes=f"Status changed from {item.status} to {status}."))
+        note = new_contact_note(db, payload.note, course_case=item)
+        previous_note = latest_contact_note(db, course_case=item)
+        db.add(UpsellCourseActivity(case_id=item.id, user_id=user.id, activity_type="STATUS_CHANGE",
+            notes=f"Status changed from {item.status} to {status}. Contact note: {note}"))
+        record_action(db, user=user, lead=lead, course_case=item, action_type="STATUS_CHANGE",
+            before_status=item.status, after_status=status, before_note=previous_note, after_note=note)
     item.status = status; lead.status = status; lead.status_updated_at = datetime.now(timezone.utc)
     db.commit(); return {"ok": True}
 
 
 @router.post("/{lead_id}/cases/{case_id}/activities")
 def save_activity(lead_id: int, case_id: int, payload: ActivityInput, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    _, item = checked_case(db, lead_id, case_id, user)
-    db.add(UpsellCourseActivity(case_id=item.id, user_id=user.id, **activity_values(payload)))
+    lead, item = checked_case(db, lead_id, case_id, user)
+    values = activity_values(payload)
+    previous_note = latest_contact_note(db, course_case=item)
+    db.add(UpsellCourseActivity(case_id=item.id, user_id=user.id, **values))
+    record_action(db, user=user, lead=lead, course_case=item,
+        action_type="NOTE" if values["activity_type"] == "NOTE" else "CONTACT",
+        before_note=previous_note, after_note=values["notes"], channel=values["activity_type"])
     db.commit(); return {"ok": True}
 
 
 @router.patch("/{lead_id}/cases/{case_id}/activities/{activity_id}")
 def edit_activity(lead_id: int, case_id: int, activity_id: int, payload: ActivityInput, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    _, item = checked_case(db, lead_id, case_id, user)
+    lead, item = checked_case(db, lead_id, case_id, user)
     activity = db.get(UpsellCourseActivity, activity_id)
     if not activity or activity.case_id != item.id or activity.activity_type == "STATUS_CHANGE": raise HTTPException(404, "Editable contact activity not found.")
-    for key, value in activity_values(payload).items(): setattr(activity, key, value)
+    values = activity_values(payload)
+    before_note = activity.notes
+    if all(getattr(activity, key) == value for key, value in values.items()):
+        return {"ok": True}
+    for key, value in values.items(): setattr(activity, key, value)
     activity.updated_at = datetime.now(timezone.utc); activity.edited_by_id = user.id
+    record_action(db, user=user, lead=lead, course_case=item, action_type="CONTACT_EDIT",
+        before_note=before_note, after_note=activity.notes, channel=activity.activity_type)
     db.commit(); return {"ok": True}
 
 
 @router.post("/{lead_id}/cases/{case_id}/convert")
-def convert_course(lead_id: int, case_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def convert_course(lead_id: int, case_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db), payload: ConversionInput | None = Body(None)):
     lead, item = checked_case(db, lead_id, case_id, user, writable=False)
     if item.status != "CONVERTED":
+        note = new_contact_note(db, payload.note if isinstance(payload, ConversionInput) else None, course_case=item)
+        previous_note = latest_contact_note(db, course_case=item)
+        db.add(UpsellCourseActivity(case_id=item.id, user_id=user.id, activity_type="STATUS_CHANGE",
+            notes=f"Status changed from {item.status} to CONVERTED. Contact note: {note}"))
+        record_action(db, user=user, lead=lead, course_case=item, action_type="STATUS_CHANGE",
+            before_status=item.status, after_status="CONVERTED", before_note=previous_note, after_note=note)
         item.status = "CONVERTED"; item.converted_at = datetime.now(timezone.utc)
         item.current_slot = None
         item.counselor_id = lead.assigned_to_user_id; item.converted_by_id = user.id

@@ -23,6 +23,7 @@ from app.services.importers.common import clean, dataframe_row_to_dict, parse_da
 from app.services.date_filters import period_condition
 
 from app.services.conversion_verification import verification_payloads, report_condition, verify_conversion
+from app.services.counselor_activity import record_action, required_contact_note, new_contact_note
 
 router = APIRouter(prefix="/crm/leads", tags=["Main CRM"])
 
@@ -42,6 +43,7 @@ REQUIRED_COLUMNS = {
 
 class StatusUpdate(BaseModel):
     status: str
+    note: str | None = None
 
 
 class AssignmentUpdate(BaseModel):
@@ -729,6 +731,7 @@ def upload_migration(
                     if age is not None and not 0 <= age <= 120: age = None
                 except ValueError:
                     age = None
+                migration_created = migration_datetime(row.get("createdat"))
                 values = {
                     "full_name": row_value(row, "name") or "Unknown", "email": email, "normalized_email": normalized_email,
                     "phone_number": phone, "normalized_phone": normalized_phone, "customer_id": customer.id,
@@ -736,11 +739,11 @@ def upload_migration(
                     "course": row_value(row, "coursename"), "region": row_value(row, "regions"),
                     "age": age, "status_of_lead": migration_status(row_value(row, "statusoflead")),
                     "assigned_to_user_id": counselor.id if counselor else None,
+                    "assigned_at": (migration_datetime(row.get("lastassignedat")) or migration_created or datetime.now(timezone.utc)) if counselor else None,
                     "sales_owner": row_value(row, "salesowner"), "notes": row_value(row, "recentnote"),
                     "matched_learner_number": learner.learner_number if learner else None,
                     "upload_batch_id": batch.id,
                 }
-                migration_created = migration_datetime(row.get("createdat"))
                 if lead:
                     for key, value in values.items():
                         if key in {"customer_id", "source_category", "source", "status_of_lead", "upload_batch_id"}:
@@ -859,13 +862,18 @@ def upload_leads(
             try: values["age"] = int(float(row.get("age"))) if clean(row.get("age")) else None
             except (TypeError, ValueError): values["age"] = None
             if lead:
+                old_assignee_id = lead.assigned_to_user_id
                 for key, value in values.items():
                     if category in {"CAMPAIGN_REPLIES", "CAMPAIGN_DATA"} and key in {"source_category", "source", "upload_batch_id"}:
                         continue
                     if category in {"INFO_EMAIL_LEADS", "LIVE_ONLINE_LEADS", "DIRECT_CALLS"} or value is not None:
                         setattr(lead, key, value)
+                if lead.assigned_to_user_id and lead.assigned_to_user_id != old_assignee_id:
+                    lead.assigned_at = datetime.now(timezone.utc)
             else:
-                lead = MainCrmLead(**values); db.add(lead)
+                lead = MainCrmLead(**values)
+                if lead.assigned_to_user_id: lead.assigned_at = datetime.now(timezone.utc)
+                db.add(lead)
             db.flush()
             if customer_is_registered(db, customer.id):
                 mark_customer_converted(db, customer.id)
@@ -897,14 +905,25 @@ def upload_leads(
 @router.patch("/{lead_id}/status")
 def update_status(lead_id: int, payload: StatusUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     lead = accessible_lead(db, lead_id, current_user)
+    db.execute(select(MainCrmLead.id).where(MainCrmLead.id == lead.id).with_for_update())
+    db.refresh(lead)
     old_status = lead.status_of_lead
-    lead.status_of_lead = payload.status.strip().upper(); lead.updated_at = datetime.now(timezone.utc)
-    if old_status != lead.status_of_lead:
+    next_status = payload.status.strip().upper()
+    if old_status != next_status:
+        note = new_contact_note(db, payload.note, main=lead)
+        lead.status_of_lead = next_status
+        previous_note = lead.notes
+        lead.notes = note
+        lead.updated_at = datetime.now(timezone.utc)
         from app.models import ConversionVerification
         if db.scalar(select(ConversionVerification.id).where(ConversionVerification.main_lead_id == lead.id)):
             from app.services.lead_workflow import mark_opportunities_dirty
             mark_opportunities_dirty(db)
-        db.add(MainCrmActivity(lead_id=lead.id, activity_type="STATUS_CHANGE", activity_date=datetime.now(timezone.utc).date(), notes=f"Status changed from {old_status} to {lead.status_of_lead}", raw_data={"from": old_status, "to": lead.status_of_lead}))
+        db.add(MainCrmActivity(lead_id=lead.id, activity_type="STATUS_CHANGE", activity_date=datetime.now(timezone.utc).date(),
+            notes=note, raw_data={"from": old_status, "to": next_status,
+                                  "actor": {"id": current_user.id, "name": current_user.display_name}}))
+        record_action(db, user=current_user, main=lead, action_type="STATUS_CHANGE",
+            before_status=old_status, after_status=next_status, before_note=previous_note, after_note=note)
     sync_main_counselors(db, [lead.customer_id])
     db.commit(); return {"id": lead.id, "status_of_lead": lead.status_of_lead}
 
@@ -944,10 +963,16 @@ def update_details(lead_id: int, payload: LeadEditPayload, current_user: User = 
 @router.post("/{lead_id}/notes")
 def add_note(lead_id: int, payload: LeadNotePayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     lead = accessible_lead(db, lead_id, current_user)
-    note = payload.note.strip()
-    if not note: raise HTTPException(status_code=400, detail="Note cannot be empty.")
+    db.execute(select(MainCrmLead.id).where(MainCrmLead.id == lead.id).with_for_update())
+    db.refresh(lead)
+    note = required_contact_note(payload.note)
+    if note == (lead.notes or "").strip():
+        raise HTTPException(400, "This note is unchanged. Add what happened in the new contact.")
+    previous_note = lead.notes
     lead.notes = note; lead.updated_at = datetime.now(timezone.utc)
-    db.add(MainCrmActivity(lead_id=lead.id, activity_type="NOTE", activity_date=datetime.now(timezone.utc).date(), notes=note, raw_data={}))
+    db.add(MainCrmActivity(lead_id=lead.id, activity_type="NOTE", activity_date=datetime.now(timezone.utc).date(),
+        notes=note, raw_data={"actor": {"id": current_user.id, "name": current_user.display_name}}))
+    record_action(db, user=current_user, main=lead, action_type="NOTE", before_note=previous_note, after_note=note)
     sync_main_counselors(db, [lead.customer_id])
     db.commit()
     return {"ok": True, "note": note}
@@ -961,6 +986,8 @@ def update_assignment(lead_id: int, payload: AssignmentUpdate, admin: User = Dep
         raise HTTPException(status_code=400, detail="Invalid counselor.")
     old_counselor = db.get(User, lead.assigned_to_user_id) if lead.assigned_to_user_id else None
     lead.assigned_to_user_id = counselor.id if counselor else None
+    if (old_counselor.id if old_counselor else None) != lead.assigned_to_user_id:
+        lead.assigned_at = datetime.now(timezone.utc) if counselor else None
     if counselor and (counselor.region or counselor.country):
         lead.region = counselor.region or counselor.country
     lead.updated_at = datetime.now(timezone.utc)

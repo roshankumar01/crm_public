@@ -106,7 +106,7 @@ class CounselorSyncTests(unittest.TestCase):
         lead = self.db.scalar(select(Lead).where(Lead.customer_id == first.id))
         self.assertEqual(lead.assigned_to_user_id, self.ben.id)
 
-    def test_owner_lookup_is_one_query_for_a_page_and_empty_page_needs_none(self):
+    def test_owner_lookup_is_two_queries_for_a_page_and_empty_page_needs_none(self):
         statements = []
         def capture(*args): statements.append(args[2])
         # Resolve ids before recording queries so expired ORM attributes do not count.
@@ -116,7 +116,7 @@ class CounselorSyncTests(unittest.TestCase):
             self.assertEqual(main_counselors(self.db, []), {})
             self.assertEqual(len(statements), 0)
             main_counselors(self.db, ids)
-            self.assertEqual(len(statements), 1)
+            self.assertEqual(len(statements), 2)
         finally:
             event.remove(self.engine, "before_cursor_execute", capture)
 

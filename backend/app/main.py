@@ -4,9 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text, select, update
 from app.database import Base, SessionLocal, engine
 from app.models import LEARNERS_CRM_INDEXES, MAIN_CRM_INDEXES, UPSELL_INDEXES, MaintenanceRun, LearnersCrmEnrollment, UpsellCourseCase, UpsellCourseActivity
-from app.routers import analytics, auth, campaigns, company_dashboard, dashboard, learner_course_mapping, learners, learners_crm, leads, main_crm, opportunities, recommendation_rules, uploads, upsell_management
+from app.routers import analytics, auth, campaigns, company_dashboard, counselor_dashboard, dashboard, learner_course_mapping, learners, learners_crm, leads, main_crm, opportunities, recommendation_rules, uploads, upsell_management, reminders
+from app.services.schema_migrations import ensure_counselor_action_columns
 
 Base.metadata.create_all(bind=engine)
+ensure_counselor_action_columns(engine)
 for table in (UpsellCourseCase.__table__, UpsellCourseActivity.__table__):
     for index in table.indexes:
         index.create(bind=engine, checkfirst=True)
@@ -21,6 +23,14 @@ if "normalized_course_name" not in {column["name"] for column in inspect(engine)
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE learners_crm_enrollments ADD COLUMN normalized_course_name VARCHAR(500)"))
         connection.execute(text("CREATE INDEX ix_learners_crm_enrollments_normalized_course_name ON learners_crm_enrollments (normalized_course_name)"))
+if "counselor_user_id" not in {column["name"] for column in inspect(engine).get_columns("learners_crm_enrollments")}:
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE learners_crm_enrollments ADD COLUMN counselor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL"))
+        connection.execute(text("CREATE INDEX ix_learners_crm_enrollments_counselor_user_id ON learners_crm_enrollments (counselor_user_id)"))
+if "assigned_at" not in {column["name"] for column in inspect(engine).get_columns("main_crm_leads")}:
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE main_crm_leads ADD COLUMN assigned_at TIMESTAMP WITH TIME ZONE"))
+        connection.execute(text("UPDATE main_crm_leads SET assigned_at = created_at WHERE assigned_to_user_id IS NOT NULL"))
 for index in (*MAIN_CRM_INDEXES, *LEARNERS_CRM_INDEXES):
     index.create(bind=engine, checkfirst=True)
 if "marketing_type" not in {column["name"] for column in inspect(engine).get_columns("marketing_campaigns")}:
@@ -76,6 +86,9 @@ lead_columns = {column["name"]: column for column in inspect(engine).get_columns
 if "counselor_from_main" not in lead_columns:
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE leads ADD COLUMN counselor_from_main BOOLEAN NOT NULL DEFAULT false"))
+if "counselor_from_daily" not in lead_columns:
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE leads ADD COLUMN counselor_from_daily BOOLEAN NOT NULL DEFAULT false"))
 if "stage" not in lead_columns:
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE leads ADD COLUMN stage INTEGER"))
@@ -128,9 +141,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(reminders.router)
 app.include_router(auth.router)
 app.include_router(dashboard.router)
 app.include_router(company_dashboard.router)
+app.include_router(counselor_dashboard.router)
 app.include_router(learners.router)
 app.include_router(opportunities.router)
 app.include_router(leads.router)

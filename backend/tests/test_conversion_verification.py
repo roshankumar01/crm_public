@@ -5,7 +5,7 @@ from sqlalchemy import delete, func, select
 from app.models import (ConversionVerification, LearnersCrmEnrollment, LearnersCrmProfile, Learner, Course, LearnerCourseRecord,
     MainCrmLead, UpsellCourseCase, LearnerCourseCategory, LearnerCourseSubcategory, LearnerCourseMapping, Lead)
 from app.routers.main_crm import converted_mismatch, verify_main_mismatch, export_converted_mismatch
-from app.routers.upsell_management import mismatch, verify_upsell_mismatch, convert_course, export_mismatch
+from app.routers.upsell_management import mismatch, verify_upsell_mismatch, convert_course, export_mismatch, ConversionInput
 from app.services.conversion_verification import verification_payloads
 from app.services.customer_lifecycle import customer_lifecycle
 from app.services.lead_workflow import mark_opportunities_dirty, sync_opportunity_leads
@@ -19,7 +19,7 @@ class ConversionVerificationTests(unittest.TestCase):
 
     def converted_case(self):
         id = self.choose()
-        convert_course(self.lead.id, id, self.owner, self.db)
+        convert_course(self.lead.id, id, self.owner, self.db, ConversionInput(note="Conversion confirmed after discussion"))
         return self.db.get(UpsellCourseCase, id)
 
     def converted_main(self):

@@ -8,14 +8,15 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, or_, select
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import LearnersCrmEnrollment, LearnersCrmProfile, MainCrmLead, UploadBatch, User
+from app.models import DailyLearnerRow, LearnersCrmEnrollment, LearnersCrmProfile, MainCrmLead, UploadBatch, User
 from app.services.auth import get_current_user, require_admin
 from app.services.customer_identity import mark_customer_converted, normalize_phone, resolve_customer
 from app.services.customer_lifecycle import customer_lifecycle
-from app.services.counselor_sync import main_counselors, counselor_fields
+from app.services.counselor_sync import main_counselors, counselor_fields, sync_main_counselors
 from app.services.importers.common import clean, clean_learner_number, dataframe_row_to_dict, parse_date, read_upload, require_columns, upload_chunks
 from app.services.learner_course_mapping import categories_for_course_names, mapping_for_course_names, normalize_course_name
 from app.services.lead_workflow import mark_opportunities_dirty
@@ -23,6 +24,7 @@ from app.services.date_filters import period_condition
 
 router = APIRouter(prefix="/learners-crm", tags=["Learners CRM"])
 REQUIRED_COLUMNS = {"enrolmentid", "learnername", "emailid", "coursename", "enrolmentdate", "startdate", "completiondate", "completionstatus"}
+DAILY_COLUMNS = {"enrolmentid", "learnername", "email", "phone", "course", "createddate", "enrolmentdate", "startdate", "counselorname"}
 
 
 def normalize_email(value):
@@ -122,6 +124,11 @@ def learner_profiles_payload(db, profiles, preview_limit=None):
         ).where(LearnersCrmEnrollment.learner_id.in_(profile_ids)).subquery()
         statement = statement.join(ranked, LearnersCrmEnrollment.enrolment_id == ranked.c.id).where(ranked.c.rank <= preview_limit)
     enrolments = db.scalars(statement.order_by(LearnersCrmEnrollment.enrolment_date.desc(), LearnersCrmEnrollment.enrolment_id)).all()
+    batch_ids = {item.upload_batch_id for item in enrolments if item.upload_batch_id}
+    batch_types = dict(db.execute(select(UploadBatch.id, UploadBatch.import_type).where(UploadBatch.id.in_(batch_ids))).all()) if batch_ids else {}
+    customer_ids = {profile.customer_id for profile in profiles if profile.customer_id}
+    matched_customers = set(db.scalars(select(MainCrmLead.customer_id).where(MainCrmLead.customer_id.in_(customer_ids)).distinct())) if customer_ids else set()
+    profile_customers = {profile.id: profile.customer_id for profile in profiles}
     mapped_categories = mapping_for_course_names(db, [enrolment.course_name for enrolment in enrolments])
     by_learner = {profile.id: [] for profile in profiles}
     for enrolment in enrolments:
@@ -134,6 +141,8 @@ def learner_profiles_payload(db, profiles, preview_limit=None):
             "start_date": enrolment.start_date,
             "completion_date": enrolment.completion_date,
             "completion_status": enrolment.completion_status,
+            "verification_status": ("VERIFIED" if profile_customers.get(enrolment.learner_id) in matched_customers else "UNMATCHED")
+                if batch_types.get(enrolment.upload_batch_id) == "LEARNERS_CRM" else "VERIFIED",
             "created_at": enrolment.created_at,
             "updated_at": enrolment.updated_at,
         })
@@ -157,8 +166,8 @@ def get_learner_profile(learner_id: int, current_user: User = Depends(get_curren
 
 @router.get("/uploads")
 def uploads(admin: User = Depends(require_admin), db: Session = Depends(get_db)):
-    rows = db.execute(select(UploadBatch).where(UploadBatch.import_type == "LEARNERS_CRM").order_by(UploadBatch.uploaded_at.desc(), UploadBatch.id.desc())).scalars().all()
-    return [{"id": row.id, "unique_number": row.unique_number, "filename": row.filename, "status": row.status, "rows_total": row.rows_total, "rows_imported": row.rows_imported, "rows_skipped": row.rows_skipped, "uploaded_at": row.uploaded_at} for row in rows]
+    rows = db.execute(select(UploadBatch).where(UploadBatch.import_type.in_(("LEARNERS_CRM", "LEARNERS_DAILY"))).order_by(UploadBatch.uploaded_at.desc(), UploadBatch.id.desc())).scalars().all()
+    return [{"id": row.id, "unique_number": row.unique_number, "filename": row.filename, "import_type": row.import_type, "status": row.status, "rows_total": row.rows_total, "rows_imported": row.rows_imported, "rows_skipped": row.rows_skipped, "uploaded_at": row.uploaded_at} for row in rows]
 
 
 @router.post("/upload")
@@ -258,3 +267,210 @@ def upload(
         if failed:
             failed.status = "FAILED"; failed.error_message = str(exc); db.commit()
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _daily_counselor(db, name):
+    name = (name or "").strip().casefold()
+    if not name:
+        return None
+    users = db.scalars(select(User).where(User.active.is_(True), User.role == "COUNSELOR",
+        func.lower(func.trim(User.display_name)) == name)).all()
+    return users[0] if len(users) == 1 else None
+
+
+def _daily_main_match(db, email, phone):
+    conditions = []
+    if email:
+        conditions.append(MainCrmLead.normalized_email == email)
+    if phone:
+        conditions.append(MainCrmLead.normalized_phone == phone)
+    if not conditions:
+        return None
+    return db.scalar(select(MainCrmLead).where(or_(*conditions)).order_by(
+        MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()).limit(1))
+
+
+def _activate_daily_row(db, row, admin, main_lead):
+    if not row.counselor_user_id:
+        raise HTTPException(400, "Choose an active counselor before verifying this learner.")
+    existing = db.get(LearnersCrmEnrollment, row.enrolment_id)
+    if existing:
+        raise HTTPException(409, f"Enrolment ID {row.enrolment_id} already exists.")
+    customer = resolve_customer(db, row.learner_name, row.email, row.phone,
+        preferred_customer_id=main_lead.customer_id if main_lead else None)
+    email_key = row.normalized_email or f"daily-missing-{row.id}@invalid.local"
+    profile = db.scalar(select(LearnersCrmProfile).where(LearnersCrmProfile.normalized_email == email_key))
+    if not profile:
+        profile = LearnersCrmProfile(customer_id=customer.id, learner_name=row.learner_name,
+            email_id=row.email or email_key, normalized_email=email_key, phone_number=row.phone,
+            normalized_phone=row.normalized_phone)
+        db.add(profile); db.flush()
+    else:
+        profile.customer_id = customer.id
+        profile.learner_name = row.learner_name
+        if row.phone:
+            profile.phone_number = row.phone
+            profile.normalized_phone = row.normalized_phone
+    db.add(LearnersCrmEnrollment(enrolment_id=row.enrolment_id, learner_id=profile.id,
+        course_name=row.course_name, enrolment_date=row.enrolment_date, start_date=row.start_date,
+        completion_status="Not Completed", upload_batch_id=row.upload_batch_id,
+        counselor_user_id=row.counselor_user_id,
+        created_at=datetime.combine(row.created_date, datetime.min.time(), tzinfo=timezone.utc)
+            if row.created_date else datetime.now(timezone.utc)))
+    row.status = "VERIFIED"
+    row.matched_main_lead_id = main_lead.id if main_lead else None
+    row.verified_by_user_id = admin.id if admin else None
+    row.verified_at = datetime.now(timezone.utc)
+    mark_customer_converted(db, customer.id)
+    mark_opportunities_dirty(db)
+    db.flush()
+    return customer.id
+
+
+@router.post("/daily-upload")
+def upload_daily(file: Annotated[UploadFile, File()], admin: User = Depends(require_admin),
+                 db: Session = Depends(get_db), progress=None):
+    batch = UploadBatch(import_type="LEARNERS_DAILY", unique_number=new_upload_number(db),
+        filename=file.filename or "unknown", status="PROCESSING")
+    db.add(batch); db.commit(); db.refresh(batch)
+    try:
+        frame = read_upload(file)
+        require_columns(frame, DAILY_COLUMNS, "Daily learners")
+        batch.rows_total = len(frame)
+        db.commit()
+        if progress: progress(rows_total=len(frame))
+        imported = skipped = verified = 0
+        skipped_rows = []
+        for processed, rows in upload_chunks(frame):
+            affected_customers = set()
+            email_keys = {normalize_email(row.get("email")) for row in rows} - {None}
+            phone_keys = {normalize_phone(clean_learner_number(row.get("phone"))) for row in rows} - {None}
+            matched = db.scalars(select(MainCrmLead).where(or_(
+                MainCrmLead.normalized_email.in_(email_keys),
+                MainCrmLead.normalized_phone.in_(phone_keys)
+            )).order_by(MainCrmLead.updated_at.desc(), MainCrmLead.id.desc())).all()
+            by_email, by_phone = {}, {}
+            for lead in matched:
+                if lead.normalized_email: by_email.setdefault(lead.normalized_email, lead)
+                if lead.normalized_phone: by_phone.setdefault(lead.normalized_phone, lead)
+            names = {clean(row.get("counselorname")) for row in rows} - {None}
+            counselors = {name: _daily_counselor(db, name) for name in names}
+            ids = {clean_learner_number(row.get("enrolmentid")) for row in rows} - {None}
+            existing = set(db.scalars(select(LearnersCrmEnrollment.enrolment_id).where(
+                LearnersCrmEnrollment.enrolment_id.in_(ids))))
+            existing.update(db.scalars(select(DailyLearnerRow.enrolment_id).where(
+                DailyLearnerRow.enrolment_id.in_(ids))))
+            for offset, data in enumerate(rows):
+                row_number = processed - len(rows) + offset + 2
+                enrolment_id = clean_learner_number(data.get("enrolmentid"))
+                name = clean(data.get("learnername"))
+                email = clean(data.get("email"))
+                phone = clean_learner_number(data.get("phone"))
+                course = clean(data.get("course"))
+                owner_name = clean(data.get("counselorname"))
+                enrolment_date = parse_date(data.get("enrolmentdate"))
+                reason = None
+                if not enrolment_id or not name or not course or not enrolment_date or not (email or phone):
+                    reason = "Missing enrolment ID, learner name, course, enrolment date, or both contacts"
+                elif enrolment_id in existing:
+                    reason = "Duplicate enrolment ID"
+                if reason:
+                    skipped += 1
+                    skipped_rows.append({"row_number": row_number, "reason": reason,
+                        **dataframe_row_to_dict(data)})
+                    continue
+                existing.add(enrolment_id)
+                email_key = normalize_email(email)
+                phone_key = normalize_phone(phone)
+                lead = by_email.get(email_key) or by_phone.get(phone_key)
+                counselor = counselors.get(owner_name)
+                row = DailyLearnerRow(upload_batch_id=batch.id, row_number=row_number,
+                    enrolment_id=enrolment_id, learner_name=name, email=email,
+                    normalized_email=email_key, phone=phone, normalized_phone=phone_key,
+                    course_name=course, created_date=parse_date(data.get("createddate")),
+                    enrolment_date=enrolment_date, start_date=parse_date(data.get("startdate")),
+                    counselor_name=owner_name, counselor_user_id=counselor.id if counselor else None,
+                    matched_main_lead_id=lead.id if lead else None)
+                db.add(row); db.flush()
+                imported += 1
+                if lead and counselor:
+                    affected_customers.add(_activate_daily_row(db, row, None, lead))
+                    verified += 1
+            if affected_customers:
+                sync_main_counselors(db, affected_customers)
+            batch.rows_imported = imported
+            batch.rows_skipped = skipped
+            db.commit()
+            if progress: progress(processed=processed, rows_imported=imported, rows_skipped=skipped)
+        batch.status = "COMPLETED"
+        db.commit()
+        return {"unique_number": batch.unique_number, "rows_total": len(frame),
+            "rows_imported": imported, "rows_skipped": skipped, "rows_verified": verified,
+            "rows_pending": imported - verified, "skipped_rows": skipped_rows}
+    except Exception as exc:
+        db.rollback()
+        failed = db.get(UploadBatch, batch.id)
+        if failed:
+            failed.status = "FAILED"; failed.error_message = str(exc); db.commit()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class VerifyDailyLearner(BaseModel):
+    email: str | None = None
+    phone: str | None = None
+    counselor_user_id: int | None = None
+
+
+@router.post("/daily-rows/{row_id}/verify")
+def verify_daily(row_id: int, payload: VerifyDailyLearner, admin: User = Depends(require_admin),
+                 db: Session = Depends(get_db)):
+    row = db.get(DailyLearnerRow, row_id)
+    if not row: raise HTTPException(404, "Daily learner row not found.")
+    if row.status == "VERIFIED": raise HTTPException(409, "This learner is already verified.")
+    row.email = clean(payload.email)
+    row.normalized_email = normalize_email(row.email)
+    row.phone = clean(payload.phone)
+    row.normalized_phone = normalize_phone(row.phone)
+    if not (row.email or row.phone): raise HTTPException(400, "Enter an email or phone number.")
+    counselor = db.get(User, payload.counselor_user_id) if payload.counselor_user_id else None
+    if not counselor or not counselor.active or counselor.role != "COUNSELOR":
+        raise HTTPException(400, "Choose an active counselor.")
+    row.counselor_user_id = counselor.id
+    row.counselor_name = counselor.display_name
+    lead = _daily_main_match(db, row.normalized_email, row.normalized_phone)
+    customer_id = _activate_daily_row(db, row, admin, lead)
+    sync_main_counselors(db, [customer_id])
+    db.commit()
+    return {"id": row.id, "status": row.status, "matched_main": bool(lead)}
+
+
+@router.get("/verification")
+def learner_verification(kind: str = "daily", page: int = 1,
+                         admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    page = max(1, page)
+    if kind in {"daily", "daily_verified"}:
+        query = select(DailyLearnerRow).where(DailyLearnerRow.status == ("PENDING" if kind == "daily" else "VERIFIED"))
+        total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+        rows = db.scalars(query.order_by(DailyLearnerRow.id.desc()).offset((page - 1) * 25).limit(25)).all()
+        return {"total": total, "page": page, "items": [{"id": row.id,
+            "enrolment_id": row.enrolment_id, "learner_name": row.learner_name,
+            "email": row.email, "phone": row.phone, "course_name": row.course_name,
+            "counselor_name": row.counselor_name, "counselor_user_id": row.counselor_user_id,
+            "matched_main": bool(row.matched_main_lead_id), "status": row.status}
+            for row in rows]}
+    if kind in {"migrated", "migrated_matched"}:
+        matched_main = select(MainCrmLead.id).where(
+            MainCrmLead.customer_id == LearnersCrmProfile.customer_id).exists()
+        query = select(LearnersCrmEnrollment, LearnersCrmProfile).join(
+            LearnersCrmProfile, LearnersCrmEnrollment.learner_id == LearnersCrmProfile.id
+        ).join(UploadBatch, LearnersCrmEnrollment.upload_batch_id == UploadBatch.id).where(
+            UploadBatch.import_type == "LEARNERS_CRM", matched_main if kind == "migrated_matched" else ~matched_main)
+        total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+        rows = db.execute(query.order_by(LearnersCrmEnrollment.created_at.desc(),
+            LearnersCrmEnrollment.enrolment_id.desc()).offset((page - 1) * 25).limit(25)).all()
+        return {"total": total, "page": page, "items": [{"id": enrolment.enrolment_id,
+            "enrolment_id": enrolment.enrolment_id, "learner_name": profile.learner_name,
+            "email": profile.email_id, "phone": profile.phone_number,
+            "course_name": enrolment.course_name, "status": "VERIFIED" if kind == "migrated_matched" else "UNMATCHED"}
+            for enrolment, profile in rows]}
+    raise HTTPException(400, "Invalid verification list.")

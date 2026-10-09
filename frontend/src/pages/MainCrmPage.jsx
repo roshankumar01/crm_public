@@ -1,3 +1,5 @@
+import StatusUpdateControl from "../components/StatusUpdateControl";
+import ReminderControl from "../components/ReminderControl";
 import VerificationTick from "../components/VerificationTick";
 ﻿import { useEffect, useState } from "react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
@@ -91,9 +93,9 @@ export default function MainCrmPage() {
     getCounselors().then(data => { if (!cancelled) setCounselors(data); }).catch(error => { if (!cancelled) setMessage(error.message); });
     return () => { cancelled = true; };
   }, [isAdmin]);
-  async function changeStatus(id, status) {
-    try { setSaving(id); await updateMainCrmLeadStatus(id, status); setRefreshKey(value => value + 1); }
-    catch (error) { setMessage(error.message); } finally { setSaving(null); }
+  async function changeStatus(id, status, note) {
+    try { setSaving(id); await updateMainCrmLeadStatus(id, status, note); setRefreshKey(value => value + 1); }
+    catch (error) { setMessage(error.message); throw error; } finally { setSaving(null); }
   }
   async function changeCounselor(id, value) {
     try { setSaving(id); await assignMainCrmLead(id, value ? Number(value) : null); setRefreshKey(value => value + 1); }
@@ -120,10 +122,10 @@ export default function MainCrmPage() {
       <td><div className="learner-cell"><div className="avatar">{lead.full_name?.[0]?.toUpperCase()}</div><div><Link className="profile-name-link" to={`/crm/leads/${lead.id}`} state={{ from: location.pathname + location.search }}>{lead.full_name}</Link><div className="small-muted">{lead.email || "No email"}</div><div className="small-muted">{lead.phone_number || "No phone"}</div></div></div></td>
       <td><strong>{lead.source || "—"}</strong><div className="small-muted">{SOURCES.find(item => item[0] === lead.source_category)?.[1]}</div>{lead.is_migrated && <div className="small-muted">Migrated</div>}</td>
       <td><strong>{lead.course || "—"}</strong><div className="small-muted">{lead.region || "No region"}{lead.age ? ` · Age ${lead.age}` : ""}</div></td>
-      <td><select className="compact-select" value={lead.status_of_lead} disabled={loading || saving === lead.id} onChange={event => changeStatus(lead.id, event.target.value)}>{optionsFor(lead).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>{lead.status_of_lead==="CONVERTED"&&<VerificationTick record={lead}/>}</td>
+      <td><StatusUpdateControl value={lead.status_of_lead} options={optionsFor(lead)} disabled={loading || saving === lead.id} onSave={(status,note)=>changeStatus(lead.id,status,note)}/>{lead.status_of_lead==="CONVERTED"&&<VerificationTick record={lead}/>}</td>
       <td>{isAdmin ? <select className="compact-select" value={lead.assigned_to_user_id || ""} disabled={loading || saving === lead.id} onChange={event => changeCounselor(lead.id, event.target.value)}><option value="">Unassigned</option>{counselors.map(counselor => <option key={counselor.id} value={counselor.id}>{counselor.display_name}</option>)}</select> : <strong>{lead.counselor || "Unassigned"}</strong>}<div className="small-muted">{lead.counselor_email || "No counselor email"}</div></td>
       <DateCell value={lead.created_at}/><DateCell value={lead.updated_at}/>
-      <td><Link className="text-link" to={`/crm/leads/${lead.id}`} state={{ from: location.pathname + location.search }}>View full profile →</Link>{lead.matched_learner_number && <div className="small-muted">Registered learner #{lead.matched_learner_number}</div>}</td>
+      <td><Link className="text-link" to={`/crm/leads/${lead.id}`} state={{ from: location.pathname + location.search }}>View full profile →</Link><ReminderControl workspace="main" leadId={lead.id} compact/>{lead.matched_learner_number && <div className="small-muted">Registered learner #{lead.matched_learner_number}</div>}</td>
     </tr>)}</tbody></table>{!leads.length && <div className="table-message">No leads match these filters.</div>}</div>
     {result && <nav className="crm-pagination" aria-label="Lead pages"><button className="secondary-button" disabled={loading || page <= 1} onClick={() => selectPage(page - 1)}>← Previous</button><span>Page {result.page} of {result.pages}</span><button className="secondary-button" disabled={loading || page >= result.pages} onClick={() => selectPage(page + 1)}>Next →</button></nav>}
   </div>;

@@ -21,6 +21,10 @@ try {
   assert.match(html, /Lead activity/);
   assert.match(html, /new@example.com/);
   assert.doesNotMatch(html, /Information edited by/);
+  const failedWrite = renderToString(React.createElement(MemoryRouter, null,
+    React.createElement(MainCrmLeadContent, { data, error: "Could not save the note" })));
+  assert.match(failedWrite, /Example Learner/);
+  assert.match(failedWrite, /Could not save the note/);
   const history = renderToString(React.createElement(EditHistory, { changes: [activity] }));
   assert.match(history, /Information edited by .*Admin/);
   assert.match(history, /old@example.com/);

@@ -169,6 +169,7 @@ class Lead(Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     counselor_from_main: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    counselor_from_daily: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -241,6 +242,7 @@ class MainCrmLead(Base):
     assigned_to_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     sales_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     matched_learner_number: Mapped[str | None] = mapped_column(
@@ -284,6 +286,7 @@ MAIN_CRM_INDEXES = (
     Index("ix_main_crm_leads_updated_id", MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()),
     Index("ix_main_crm_leads_source_updated_id", MainCrmLead.source_category, MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()),
     Index("ix_main_crm_leads_owner_updated_id", MainCrmLead.assigned_to_user_id, MainCrmLead.updated_at.desc(), MainCrmLead.id.desc()),
+    Index("ix_main_crm_leads_owner_assigned_id", MainCrmLead.assigned_to_user_id, MainCrmLead.assigned_at.desc(), MainCrmLead.id.desc()),
     Index("ix_main_crm_leads_source_status", MainCrmLead.source_category, MainCrmLead.status_of_lead),
     Index("ix_main_crm_activities_lead_type", MainCrmActivity.lead_id, MainCrmActivity.activity_type),
     Index("ix_main_crm_activities_lead_date", MainCrmActivity.lead_id, MainCrmActivity.activity_date.desc(), MainCrmActivity.id.desc()),
@@ -316,8 +319,34 @@ class LearnersCrmEnrollment(Base):
     completion_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     completion_status: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     upload_batch_id: Mapped[int | None] = mapped_column(ForeignKey("upload_batches.id", ondelete="SET NULL"), nullable=True, index=True)
+    counselor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class DailyLearnerRow(Base):
+    __tablename__ = "daily_learner_rows"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    upload_batch_id: Mapped[int] = mapped_column(ForeignKey("upload_batches.id", ondelete="CASCADE"), nullable=False, index=True)
+    row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    enrolment_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    learner_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(320))
+    normalized_email: Mapped[str | None] = mapped_column(String(320), index=True)
+    phone: Mapped[str | None] = mapped_column(String(100))
+    normalized_phone: Mapped[str | None] = mapped_column(String(40), index=True)
+    course_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_date: Mapped[date | None] = mapped_column(Date)
+    enrolment_date: Mapped[date | None] = mapped_column(Date)
+    start_date: Mapped[date | None] = mapped_column(Date)
+    counselor_name: Mapped[str | None] = mapped_column(String(255))
+    counselor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    matched_main_lead_id: Mapped[int | None] = mapped_column(ForeignKey("main_crm_leads.id", ondelete="SET NULL"), index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", index=True)
+    verified_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 LEARNERS_CRM_INDEXES = (
@@ -383,6 +412,46 @@ class UpsellInfoEdit(Base):
     lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), index=True)
     raw_data: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CounselorAction(Base):
+    __tablename__ = "counselor_actions"
+    __table_args__ = (
+        Index("ix_counselor_actions_actor_time", "user_id", "created_at", "id"),
+        Index("ix_counselor_actions_type_time", "action_type", "created_at", "id"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    main_lead_id: Mapped[int | None] = mapped_column(ForeignKey("main_crm_leads.id", ondelete="CASCADE"), index=True)
+    upsell_lead_id: Mapped[int | None] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), index=True)
+    upsell_case_id: Mapped[int | None] = mapped_column(ForeignKey("upsell_course_cases.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    actor_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    assigned_counselor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    assigned_counselor_name: Mapped[str | None] = mapped_column(String(255))
+    action_type: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    before_status: Mapped[str | None] = mapped_column(String(50))
+    after_status: Mapped[str | None] = mapped_column(String(50))
+    before_note: Mapped[str | None] = mapped_column(Text)
+    after_note: Mapped[str | None] = mapped_column(Text)
+    course_name: Mapped[str | None] = mapped_column(String(500))
+    source: Mapped[str | None] = mapped_column(String(255))
+    channel: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class LeadReminder(Base):
+    __tablename__ = "lead_reminders"
+    __table_args__ = (Index("ix_lead_reminders_pending_due", "completed_at", "due_date", "id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    main_lead_id: Mapped[int | None] = mapped_column(ForeignKey("main_crm_leads.id", ondelete="CASCADE"), unique=True)
+    upsell_lead_id: Mapped[int | None] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), unique=True)
+    due_date: Mapped[date] = mapped_column(Date, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    updated_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class ConversionVerification(Base):

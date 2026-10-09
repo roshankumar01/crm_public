@@ -23,6 +23,7 @@ router = APIRouter(prefix="/leads", tags=["Leads"])
 
 class StatusUpdate(BaseModel):
     status: str
+    note: str | None = None
 
 
 class AssignmentUpdate(BaseModel):
@@ -150,7 +151,7 @@ def get_tracked_leads(
             "is_active": lead.is_active,
             "assigned_to_user_id": lead.assigned_to_user_id,
             "assigned_to_name": counselor.display_name if counselor else None,
-            "assignment_source": "MAIN_CRM" if lead.counselor_from_main else None,
+            "assignment_source": "DAILY_LEARNERS" if lead.counselor_from_daily else "MAIN_CRM" if lead.counselor_from_main else None,
             "updated_at": lead.updated_at,
             "latest_campaign": ({
                 "marketing_type": latest_campaign[lead.learner_number].marketing_type,
@@ -203,7 +204,7 @@ def get_lead(
             "is_active": lead.is_active,
             "assigned_to_user_id": lead.assigned_to_user_id,
             "assigned_to_name": counselor.display_name if counselor else None,
-            "assignment_source": "MAIN_CRM" if lead.counselor_from_main else None,
+            "assignment_source": "DAILY_LEARNERS" if lead.counselor_from_daily else "MAIN_CRM" if lead.counselor_from_main else None,
             "assigned_at": lead.assigned_at,
             "status_updated_at": lead.status_updated_at,
             "created_at": lead.created_at,
@@ -255,10 +256,10 @@ def update_status(
     current_case = db.scalar(select(UpsellCourseCase).where(UpsellCourseCase.lead_id == lead.id, UpsellCourseCase.current_slot == 1))
     if current_case:
         from app.routers.upsell_management import case_status, CaseStatus
-        case_status(lead.id, current_case.id, CaseStatus(status=payload.status), current_user, db)
+        case_status(lead.id, current_case.id, CaseStatus(status=payload.status, note=payload.note), current_user, db)
         db.refresh(lead)
         return {"id": lead.id, "status": lead.status, "status_updated_at": lead.status_updated_at}
-    updated = change_lead_status(db, lead, payload.status, current_user)
+    updated = change_lead_status(db, lead, payload.status, current_user, payload.note)
     return {"id": updated.id, "status": updated.status, "status_updated_at": updated.status_updated_at}
 
 
@@ -276,7 +277,7 @@ def update_assignment(
         "id": updated.id,
         "assigned_to_user_id": updated.assigned_to_user_id,
         "assigned_to_name": counselor.display_name if counselor else None,
-            "assignment_source": "MAIN_CRM" if lead.counselor_from_main else None,
+            "assignment_source": "DAILY_LEARNERS" if lead.counselor_from_daily else "MAIN_CRM" if lead.counselor_from_main else None,
         "assigned_at": updated.assigned_at,
     }
 

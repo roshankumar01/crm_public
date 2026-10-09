@@ -349,3 +349,11 @@ body { background: radial-gradient(circle at 80% -20%, #eee9ff 0, transparent 32
 .upload-reset-confirmation { width:100%;padding:10px;border:1px solid #d8d4e2;border-radius:9px; }
 .upload-reset-actions { display:flex;justify-content:flex-end;gap:10px;margin-top:18px; }
 .upload-reset-actions button:first-child { border:1px solid var(--line);border-radius:10px;padding:11px 16px;background:white;cursor:pointer; }
+.learner-verification-page .segmented-control { margin:20px 0;flex-wrap:wrap; }
+.learner-verification-page .table-card { overflow-x:auto; }
+.learner-verification-page td input,.learner-verification-page td select { min-width:150px;max-width:230px;width:100%;padding:8px;border:1px solid var(--line);border-radius:9px;background:#fff; }
+.learner-verification-page td .primary-button { white-space:nowrap; }
+.learner-verification-tick { display:inline-grid;place-items:center;width:24px;height:24px;border-radius:50%;font-size:14px;font-weight:900; }
+.learner-verification-tick.verified { color:#0f8c5a;background:#e5f7ee; }
+.learner-verification-tick.unmatched { color:#c03846;background:#ffeaec; }
+.learner-verification-tick.pending { color:#7c8190;background:#eef0f4; }

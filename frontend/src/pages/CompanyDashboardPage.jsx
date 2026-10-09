@@ -5,7 +5,7 @@ import "./company-dashboard.css";
 
 const formatNumber = value => Number(value || 0).toLocaleString();
 const localDate = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-const rangePreset = days => {
+export const rangePreset = days => {
   if (days === "all") return { startDate: "", endDate: "" };
   const end = new Date(), start = new Date();
   if (days === "yesterday") { end.setDate(end.getDate() - 1); start.setDate(start.getDate() - 1); }
@@ -21,7 +21,7 @@ const initialRange = () => {
   return { startDate: "", endDate: "" };
 };
 
-function DateRangePicker({ value, onChange }) {
+export function DateRangePicker({ value, onChange }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(value);
   const [error, setError] = useState("");
@@ -38,7 +38,7 @@ function DateRangePicker({ value, onChange }) {
   return <div className="cd-date-picker" ref={root}>
     <button type="button" className={`cd-date-trigger ${open ? "active" : ""}`} aria-expanded={open} onClick={() => { setDraft(value); setError(""); setOpen(!open); }}><span className="cd-date-icon" aria-hidden="true">▦</span><span><small>DATE RANGE</small><strong>{label}</strong></span><span className="cd-date-chevron">⌄</span></button>
     {open && <div className="cd-date-popover"><div className="cd-date-popover-head"><strong>Choose a date range</strong><span>Filter every dashboard metric</span></div>
-      <div className="cd-date-presets">{[[1, "Today"], ["yesterday", "Yesterday"], [7, "Last 7 days"], [30, "Last 30 days"], ["year", "This year"], ["all", "All time"]].map(([days, name]) => <button type="button" key={name} onClick={() => apply(rangePreset(days))}>{name}</button>)}</div>
+      <div className="cd-date-presets">{[[1, "Today"], ["yesterday", "Yesterday"], [7, "Last 7 days"], [30, "Last 1 month"], ["year", "This year"], ["all", "All time"]].map(([days, name]) => <button type="button" key={name} onClick={() => apply(rangePreset(days))}>{name}</button>)}</div>
       <div className="cd-date-fields"><label>From<input type="date" value={draft.startDate} onChange={event => setDraft({ ...draft, startDate: event.target.value })}/></label><label>To<input type="date" value={draft.endDate} onChange={event => setDraft({ ...draft, endDate: event.target.value })}/></label></div>
       {error && <p className="cd-date-error">{error}</p>}
       <div className="cd-date-actions"><button type="button" className="cd-date-clear" onClick={() => apply(rangePreset("all"))}>Clear range</button><button type="button" className="cd-date-apply" onClick={() => { if (!draft.startDate || !draft.endDate || draft.startDate > draft.endDate) setError("Choose a valid start and end date."); else apply(draft); }}>Apply range</button></div>
@@ -268,7 +268,7 @@ export default function CompanyDashboardPage({ section = "overview" }) {
   const headings = { overview: ["Company overview", "A clear view of demand, conversions and growth."], sales: ["Sales performance", "Follow team results from first enquiry to conversion."], dinesh: ["Dinesh · Results intelligence", "IGC and IDIP outcomes from the Upsell result uploads."] };
   return <div className="page cd-page">
     <header className="cd-hero"><div className="cd-hero-glow"/><div className="cd-hero-content"><div className="cd-eyebrow"><span/> GWG INTELLIGENCE / {section.toUpperCase()}</div><h1>{headings[section][0]}</h1><p>{headings[section][1]}</p></div><div className="cd-hero-mark" aria-hidden="true">GWG<span>↗</span></div></header>
-    <div className="cd-toolbar"><nav className="cd-tabs" aria-label="Dashboard pages"><NavLink end to="/dashboard">Overview</NavLink><NavLink to="/dashboard/sales">Sales</NavLink><NavLink to="/dashboard/dinesh">Dinesh</NavLink></nav><DateRangePicker value={range} onChange={changeRange}/></div>
+    <div className="cd-toolbar"><nav className="cd-tabs" aria-label="Dashboard pages"><NavLink end to="/dashboard">Overview</NavLink><NavLink to="/dashboard/sales">Sales</NavLink><NavLink to="/dashboard/dinesh">Dinesh</NavLink><NavLink to="/dashboard/counselors">Counselors</NavLink></nav><DateRangePicker value={range} onChange={changeRange}/></div>
     {error && <div className="cd-alert">Could not load dashboard: {error}</div>}
     {!data && !error && <div className="cd-loading"><span/>Preparing dashboard…</div>}
     {data && (section === "sales" ? <Sales data={data} range={range}/> : section === "dinesh" ? <Dinesh data={data}/> : <Overview data={data}/>)}

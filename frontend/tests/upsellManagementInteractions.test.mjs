@@ -74,12 +74,18 @@ try {
   await waitFor("!document.querySelector('select[aria-label=\"Course\"]').disabled");
   await evaluate("selectValue('Course','1')");
   await waitFor("!document.querySelector('#upsell-contact-form fieldset').disabled");
+  await evaluate("selectValue('Course lead status','IN_CONTACT')");
+  await waitFor("!!document.querySelector('[role=dialog][aria-label=\"Explain status change\"]')");
+  assert.equal(await evaluate("window.calls.filter(c=>c.path.endsWith('/cases/1/status')).length"),0,'Upsell status waits for a note');
+  await evaluate("inputValue('[role=dialog] textarea','Spoke about the IGC schedule');document.querySelector('[role=dialog] button[type=submit]').click()");
+  await waitFor("window.calls.some(c=>c.path.endsWith('/cases/1/status')) && !document.querySelector('[role=dialog]')");
+  assert.deepEqual(await evaluate("window.calls.find(c=>c.path.endsWith('/cases/1/status')).body"),{status:'IN_CONTACT',note:'Spoke about the IGC schedule'});
   await evaluate("inputValue('#upsell-contact-form textarea','IGC contact note');clickText('Save contact')");
   await waitFor("!!document.querySelector('.activity-card') && document.querySelector('.activity-card').textContent.includes('IGC contact note')");
   await evaluate("document.querySelector('.upsell-activity-heading button').click()");
   await evaluate("inputValue('#upsell-contact-form textarea','IGC edited note');clickText('Save changes')");
   await waitFor("document.querySelector('.activity-card').textContent.includes('IGC edited note')");
-  await evaluate("clickText('Update converted')");
+  await evaluate("inputValue('#upsell-contact-form textarea','Agreed to IGC enrolment');clickText('Update converted')");
   await waitFor("document.querySelectorAll('.upsell-converted-card').length===1 && document.querySelector('select[aria-label=\"Course\"]').value===''");
   assert.equal(await evaluate("document.querySelector('#upsell-contact-form fieldset').disabled"),true);
   await evaluate("selectValue('Main category','Safety');");
@@ -89,7 +95,7 @@ try {
   assert.ok(await evaluate("!document.querySelector('#upsell-contact-form').textContent.includes('IGC edited note')"),'Contact histories stay separate');
   await evaluate("inputValue('#upsell-contact-form textarea','PSM contact note');clickText('Save contact')");
   await waitFor("document.querySelector('#upsell-contact-form').textContent.includes('PSM contact note')");
-  await evaluate("clickText('Update converted')");
+  await evaluate("inputValue('#upsell-contact-form textarea','Agreed to PSM enrolment');clickText('Update converted')");
   await waitFor("document.querySelectorAll('.upsell-converted-card').length===2");
   assert.ok(await evaluate("!window.calls.some(c=>c.path.startsWith('/crm/') && c.method!=='GET')"),'Upsell edits do not write Main CRM');
   const screenshot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:true});

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal, get_db
 from app.models import (
-    Lead, LeadActivity, Learner, LearnerCourseRecord, LearnersCrmEnrollment,
+    DailyLearnerRow, Lead, LeadActivity, Learner, LearnerCourseRecord, LearnersCrmEnrollment,
     LearnersCrmProfile, MainCrmActivity, MainCrmLead, MarketingCampaign, UploadBatch, UpsellCourseCase, User,
 )
 from app.services.auth import require_admin
@@ -33,6 +33,8 @@ def run_upload_job(job_id, payload, filename, kind, import_type, source_category
                 result = main_crm.upload_leads(source_category, upload_file, mode, unique_number, admin, db, progress)
             elif kind == "LEARNERS_CRM":
                 result = learners_crm.upload(upload_file, mode, unique_number, admin, db, progress)
+            elif kind == "LEARNERS_DAILY":
+                result = learners_crm.upload_daily(upload_file, admin, db, progress)
             elif kind == "COURSE":
                 batch = import_course_file(db, import_type, upload_file, progress)
                 result = {"id": batch.id, "rows_total": batch.rows_total,
@@ -66,7 +68,7 @@ def start_upload_job(
 
     kind = kind.strip().upper()
     mode = upload_mode.strip().upper()
-    if kind not in {"MAIN_CRM", "LEARNERS_CRM", "COURSE", "CAMPAIGN"}:
+    if kind not in {"MAIN_CRM", "LEARNERS_CRM", "LEARNERS_DAILY", "COURSE", "CAMPAIGN"}:
         raise HTTPException(status_code=400, detail="Invalid upload kind.")
     if not (file.filename or "").lower().endswith((".xlsx", ".csv")):
         raise HTTPException(status_code=400, detail="Only .xlsx and .csv files are supported.")
@@ -191,6 +193,7 @@ def reset_selected_uploads(
         db.execute(delete(LearnerCourseRecord).where(LearnerCourseRecord.upload_batch_id.in_(ids)))
         db.execute(delete(MarketingCampaign).where(MarketingCampaign.upload_batch_id.in_(ids)))
         db.execute(delete(LearnersCrmEnrollment).where(LearnersCrmEnrollment.upload_batch_id.in_(ids)))
+        db.execute(delete(DailyLearnerRow).where(DailyLearnerRow.upload_batch_id.in_(ids)))
 
         # A shared lead may still have activity from another upload. Preserve it.
         has_activity = select(MainCrmActivity.id).where(MainCrmActivity.lead_id == MainCrmLead.id).exists()

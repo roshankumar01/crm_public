@@ -48,9 +48,9 @@ export const getOpportunities = () => request("/opportunities");
 export const getCounselors = () => request("/leads/counselors");
 export const getTrackedLeads = (params = {}) => request(`/leads?${new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== "")).toString()}`);
 export const getLead = leadId => request(`/leads/${leadId}`);
-export const updateLeadStatus = (leadId, status) => request(`/leads/${leadId}/status`, {
+export const updateLeadStatus = (leadId, status, note) => request(`/leads/${leadId}/status`, {
   method: "PATCH",
-  body: JSON.stringify({ status }),
+  body: JSON.stringify({ status, note }),
 });
 export const assignLead = (leadId, counselorUserId) => request(`/leads/${leadId}/assignment`, {
   method: "PATCH",
@@ -152,8 +152,8 @@ export const getMainCrmLead = leadId => request(`/crm/leads/detail/${leadId}`);
 export const updateMainCrmLeadDetails = (leadId, payload) => request(`/crm/leads/${leadId}/details`, { method: "PATCH", body: JSON.stringify(payload) });
 export const addMainCrmLeadNote = (leadId, note) => request(`/crm/leads/${leadId}/notes`, { method: "POST", body: JSON.stringify({ note }) });
 export const getMainCrmCampaignActivities = () => request("/crm/leads/campaign-activities");
-export const updateMainCrmLeadStatus = (leadId, status) => request(`/crm/leads/${leadId}/status`, {
-  method: "PATCH", body: JSON.stringify({ status }),
+export const updateMainCrmLeadStatus = (leadId, status, note) => request(`/crm/leads/${leadId}/status`, {
+  method: "PATCH", body: JSON.stringify({ status, note }),
 });
 export const assignMainCrmLead = (leadId, counselorUserId) => request(`/crm/leads/${leadId}/assignment`, {
   method: "PATCH", body: JSON.stringify({ counselor_user_id: counselorUserId || null }),
@@ -197,6 +197,8 @@ export async function downloadUploadSkipped(jobId) {
 export const searchLearnersCrm = (search, page = 1) => request(`/learners-crm/learners?search=${encodeURIComponent(search)}&page=${page}`);
 export const getLearnersCrmProfile = learnerId => request(`/learners-crm/learners/${learnerId}`);
 export const getLearnersCrmUploads = () => request("/learners-crm/uploads");
+export const getLearnerVerification = (kind = "daily", page = 1) => request(`/learners-crm/verification?kind=${encodeURIComponent(kind)}&page=${page}`);
+export const verifyDailyLearner = (id, values) => request(`/learners-crm/daily-rows/${id}/verify`, { method: "POST", body: JSON.stringify(values) });
 export const getLearnerCourseMapping = () => request("/learners-crm/course-mapping");
 export const createLearnerCourseCategory = name => request("/learners-crm/course-mapping/categories", { method: "POST", body: JSON.stringify({ name }) });
 export const updateLearnerCourseCategory = (id, name) => request(`/learners-crm/course-mapping/categories/${id}`, { method: "PATCH", body: JSON.stringify({ name }) });
@@ -220,10 +222,10 @@ export const getUpsellManagement = (id, page=1) => request(`/upsell/manage/${id}
 export const getUpsellCourseCatalog = () => request("/upsell/manage/catalog");
 export const editUpsellInfo = (id, payload) => request(`/upsell/manage/${id}/info`, {method:"PATCH",body:JSON.stringify(payload)});
 export const chooseUpsellCourse = (id, mapping_id) => request(`/upsell/manage/${id}/cases`, {method:"POST",body:JSON.stringify({mapping_id})});
-export const setUpsellCourseStatus = (id, caseId, status) => request(`/upsell/manage/${id}/cases/${caseId}/status`, {method:"PATCH",body:JSON.stringify({status})});
+export const setUpsellCourseStatus = (id, caseId, status, note) => request(`/upsell/manage/${id}/cases/${caseId}/status`, {method:"PATCH",body:JSON.stringify({status,note})});
 export const saveUpsellCourseActivity = (id, caseId, payload) => request(`/upsell/manage/${id}/cases/${caseId}/activities`, {method:"POST",body:JSON.stringify(payload)});
 export const editUpsellCourseActivity = (id, caseId, activityId, payload) => request(`/upsell/manage/${id}/cases/${caseId}/activities/${activityId}`, {method:"PATCH",body:JSON.stringify(payload)});
-export const convertUpsellCourse = (id, caseId) => request(`/upsell/manage/${id}/cases/${caseId}/convert`, {method:"POST"});
+export const convertUpsellCourse = (id, caseId, note) => request(`/upsell/manage/${id}/cases/${caseId}/convert`, {method:"POST",body:JSON.stringify({note})});
 export const getUpsellMismatch = (period="all",page=1,state="pending") => request(`/upsell/manage/mismatch?period=${encodeURIComponent(period)}&page=${page}&state=${encodeURIComponent(state)}`);
 export const downloadUpsellMismatch = (period,state="pending") => downloadCrmExport(`/upsell/manage/mismatch/export?period=${encodeURIComponent(period)}&state=${encodeURIComponent(state)}`,"upsell-mismatch.xlsx");
 
@@ -233,3 +235,14 @@ export const verifyMainCrmMismatch = id => request(`/crm/leads/mismatch/${id}/ve
 export const verifyUpsellMismatch = id => request(`/upsell/manage/mismatch/${id}/verify`, {method:"POST"});
 
 export const resetAllCrmData = () => request("/uploads/reset-all", {method:"POST",body:JSON.stringify({confirmation:"RESET ALL CRM DATA"})});
+
+export const getLeadReminder = (workspace,id) => request(`/reminders/${workspace}/${id}`);
+export const saveLeadReminder = (workspace,id,days,notes) => request(`/reminders/${workspace}/${id}`,{method:"PUT",body:JSON.stringify({days,notes})});
+export const completeLeadReminder = (workspace,id) => request(`/reminders/${workspace}/${id}/complete`,{method:"POST"});
+export const getReminders = (workspace,view="pending",page=1,counselorId="") => request(`/reminders/${workspace}?view=${view}&page=${page}${counselorId?`&counselor_id=${encodeURIComponent(counselorId)}`:""}`);
+
+const counselorRangeQuery = range => range?.startDate && range?.endDate
+  ? `period=custom&start_date=${encodeURIComponent(range.startDate)}&end_date=${encodeURIComponent(range.endDate)}`
+  : "period=all";
+export const getCounselorDashboard = range => request(`/company-dashboard/counselors?${counselorRangeQuery(range)}`);
+export const getCounselorChanges = (counselorId,range,page=1,mode="all",person="") => request(`/company-dashboard/counselors/changes?counselor_id=${encodeURIComponent(counselorId)}&page=${page}&mode=${encodeURIComponent(mode)}${person?`&person=${encodeURIComponent(person)}`:""}&${counselorRangeQuery(range)}`);

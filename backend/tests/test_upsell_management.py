@@ -12,7 +12,7 @@ from app.models import (Course, Customer, Lead, Learner, LearnerCourseRecord, Le
     LearnerCourseMapping, LearnerCourseSubcategory, LearnersCrmEnrollment, LearnersCrmProfile,
     MainCrmLead, UpsellCourseActivity, UpsellCourseCase, UpsellInfoEdit, User)
 from app.routers.upsell_management import (ActivityInput, CourseChoice, InfoEdit, CaseStatus,
-    choose_course, convert_course, edit_activity, edit_info, management, mismatch, save_activity, case_status)
+    choose_course, convert_course, ConversionInput, edit_activity, edit_info, management, mismatch, save_activity, case_status)
 from app.routers.main_crm import LeadEditPayload, update_details
 from app.services.customer_lifecycle import customer_lifecycle
 from app.services.lead_analytics import build_lead_analytics
@@ -78,7 +78,7 @@ class UpsellManagementTests(unittest.TestCase):
         self.assertEqual(self.main.email, "main@test.com")
 
     def test_same_subcategory_registration_for_another_person_does_not_match(self):
-        first = self.choose(); convert_course(self.lead.id, first, self.owner, self.db)
+        first = self.choose(); convert_course(self.lead.id, first, self.owner, self.db, ConversionInput(note="Conversion confirmed after discussion"))
         other = Customer(primary_name="Someone else")
         self.db.add(other); self.db.flush()
         profile = LearnersCrmProfile(customer_id=other.id, learner_name="Someone else", email_id="else@test.com", normalized_email="else@test.com")
@@ -105,14 +105,14 @@ class UpsellManagementTests(unittest.TestCase):
         self.assertEqual(cases[first]["activities"][0]["notes"], "IGC edited")
         self.assertEqual(cases[second]["activities"][0]["notes"], "PSM conversation")
         self.assertEqual(cases[first]["activities"][0]["edited_by"], "Counselor")
-        convert_course(self.lead.id, first, self.owner, self.db)
+        convert_course(self.lead.id, first, self.owner, self.db, ConversionInput(note="Conversion confirmed after discussion"))
         with self.assertRaises(HTTPException): edit_activity(self.lead.id, first, row.id, ActivityInput(notes="change"), self.owner, self.db)
 
     def test_conversion_is_idempotent_and_not_a_registration_or_main_status_edit(self):
         first = self.choose()
-        convert_course(self.lead.id, first, self.owner, self.db)
+        convert_course(self.lead.id, first, self.owner, self.db, ConversionInput(note="Conversion confirmed after discussion"))
         timestamp = self.db.get(UpsellCourseCase, first).converted_at
-        convert_course(self.lead.id, first, self.owner, self.db)
+        convert_course(self.lead.id, first, self.owner, self.db, ConversionInput(note="Conversion confirmed after discussion"))
         self.assertEqual(self.db.get(UpsellCourseCase, first).converted_at, timestamp)
         self.assertEqual(self.db.scalar(select(func.count()).select_from(UpsellCourseCase)), 1)
         self.assertEqual(self.db.scalar(select(func.count()).select_from(LearnersCrmEnrollment)), 0)
@@ -123,7 +123,7 @@ class UpsellManagementTests(unittest.TestCase):
         self.assertFalse(any(e["kind"] == "ENROLMENT" for e in events))
 
     def test_mismatch_matches_same_person_and_subcategory_across_course_versions(self):
-        first = self.choose(); convert_course(self.lead.id, first, self.owner, self.db)
+        first = self.choose(); convert_course(self.lead.id, first, self.owner, self.db, ConversionInput(note="Conversion confirmed after discussion"))
         self.assertEqual(mismatch("all", 1, self.admin, self.db)["total"], 1)
         profile = LearnersCrmProfile(customer_id=self.customer.id, learner_name="Person", email_id="person@test.com", normalized_email="person@test.com")
         self.db.add(profile); self.db.flush()
@@ -134,23 +134,23 @@ class UpsellManagementTests(unittest.TestCase):
         self.assertEqual(mismatch("all", 1, self.admin, self.db)["total"], 0)
 
     def test_result_registration_only_matches_the_correct_subcategory(self):
-        first = self.choose(self.psm); convert_course(self.lead.id, first, self.owner, self.db)
+        first = self.choose(self.psm); convert_course(self.lead.id, first, self.owner, self.db, ConversionInput(note="Conversion confirmed after discussion"))
         learner = Learner(learner_number="L1", name="Person", customer_id=self.customer.id)
         course = Course(code="IGC", name="IGC", program_code="IGC")
         self.db.add_all([learner, course]); self.db.flush()
         self.db.add(LearnerCourseRecord(learner_number="L1", course_id=course.id, event_date=date(2026, 1, 1), result="REFER", row_hash="result"))
         self.db.commit()
         self.assertEqual(mismatch("all", 1, self.admin, self.db)["total"], 1)
-        second = self.choose(self.igc); convert_course(self.lead.id, second, self.owner, self.db)
+        second = self.choose(self.igc); convert_course(self.lead.id, second, self.owner, self.db, ConversionInput(note="Conversion confirmed after discussion"))
         self.assertEqual(mismatch("all", 1, self.admin, self.db)["total"], 1)
 
     def test_conversions_survive_next_course_and_recommendation_refresh_in_analytics(self):
-        first = self.choose(); convert_course(self.lead.id, first, self.owner, self.db)
+        first = self.choose(); convert_course(self.lead.id, first, self.owner, self.db, ConversionInput(note="Conversion confirmed after discussion"))
         second = self.choose(self.psm)
         self.assertEqual(self.lead.status, "NEW")
         summary = build_lead_analytics(self.db, self.admin)["summary"]
         self.assertEqual((summary["converted"], summary["new"]), (1, 1))
-        convert_course(self.lead.id, second, self.owner, self.db)
+        convert_course(self.lead.id, second, self.owner, self.db, ConversionInput(note="Conversion confirmed after discussion"))
         mark_opportunities_dirty(self.db); self.db.commit(); sync_opportunity_leads(self.db)
         self.assertEqual(build_lead_analytics(self.db, self.admin)["summary"]["converted"], 2)
         self.assertEqual(get_all_opportunities(self.db, self.admin)["summary"]["converted"], 2)
@@ -162,16 +162,16 @@ class UpsellManagementTests(unittest.TestCase):
         row = self.db.scalar(select(UpsellCourseActivity).where(UpsellCourseActivity.case_id == first))
         with self.assertRaises(HTTPException): edit_activity(self.lead.id, second, row.id, ActivityInput(notes="Wrong course"), self.owner, self.db)
         with self.assertRaises(HTTPException): case_status(self.lead.id, first, CaseStatus(status="CONVERTED"), self.owner, self.db)
-        convert_course(self.lead.id, first, self.owner, self.db)
+        convert_course(self.lead.id, first, self.owner, self.db, ConversionInput(note="Conversion confirmed after discussion"))
         self.assertEqual(mismatch("all", 1, self.other, self.db)["total"], 0)
 
     def test_pipeline_status_updates_the_selected_course_panel(self):
         first = self.choose(); second = self.choose(self.psm)
-        update_status(self.lead.id, StatusUpdate(status="IN_CONTACT"), self.owner, self.db)
+        update_status(self.lead.id, StatusUpdate(status="IN_CONTACT", note="Discussed course options"), self.owner, self.db)
         self.assertEqual(self.db.get(UpsellCourseCase, first).status, "NEW")
         self.assertEqual(self.db.get(UpsellCourseCase, second).status, "IN_CONTACT")
         with self.assertRaises(HTTPException): update_status(self.lead.id, StatusUpdate(status="CONVERTED"), self.owner, self.db)
-        convert_course(self.lead.id, second, self.owner, self.db)
+        convert_course(self.lead.id, second, self.owner, self.db, ConversionInput(note="Conversion confirmed after discussion"))
         self.assertIsNone(self.db.get(UpsellCourseCase, second).current_slot)
         data = management(self.lead.id, self.owner, self.db, 1)
         self.assertFalse(any(c["is_current"] for c in data["cases"]))
@@ -198,7 +198,7 @@ class UpsellManagementTests(unittest.TestCase):
 
     def test_mismatch_export_is_readable_excel_with_counselor_and_course(self):
         import asyncio
-        first = self.choose(); convert_course(self.lead.id, first, self.owner, self.db)
+        first = self.choose(); convert_course(self.lead.id, first, self.owner, self.db, ConversionInput(note="Conversion confirmed after discussion"))
         response = export_mismatch("all", self.admin, self.db)
         async def read():
             return b"".join([chunk async for chunk in response.body_iterator])
